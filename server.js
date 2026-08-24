@@ -277,8 +277,13 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
   html, body { width:600px; height:600px; overflow:hidden; background:var(--ink); color:var(--text);
     font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; -webkit-font-smoothing:antialiased; }
   .mono { font-family:"SF Mono","Roboto Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums; letter-spacing:.04em; }
-  .screen { display:none; width:600px; height:600px; flex-direction:column; }
+  .screen { display:none; width:600px; height:600px; flex-direction:column; position:relative; }
   .screen.active { display:flex; }
+
+  /* The focus sink. Keyboard focus lives here whenever the player is up, so
+     pinches reach this page instead of disappearing into the YouTube iframe. */
+  #sink { position:absolute; top:0; left:0; width:1px; height:1px; opacity:0; border:none; background:none; }
+
   header { display:flex; align-items:baseline; justify-content:space-between; padding:24px 28px 16px; border-bottom:2px solid var(--rail); }
   .slug { font-size:26px; font-weight:700; letter-spacing:.14em; }
   .count { font-size:20px; color:var(--cue); }
@@ -297,53 +302,108 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
   .notice-body { font-size:20px; line-height:1.45; color:var(--muted); }
   .notice-body strong { color:var(--cue); font-weight:600; }
   footer { padding:14px 28px 22px; font-size:16px; color:var(--muted); border-top:2px solid var(--rail); }
-  .now { padding:20px 28px 12px; }
+
+  /* ---- Player: video fills the display, everything else floats over it ---- */
+  #playerScreen { display:none; }
+  #playerScreen.active { display:block; }
+
+  .stage { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; overflow:hidden; background:var(--ink); }
+  /* Nothing inside the iframe can be clicked or focused. All control goes
+     through the player API instead, so YouTube's own UI is unreachable. */
+  .stage iframe { border:0; display:block; pointer-events:none; }
+
+  .chrome { position:absolute; inset:0; pointer-events:none; opacity:1; transition:opacity 400ms ease; }
+  .chrome.hidden { opacity:0; }
+  .chrome-top { position:absolute; top:0; left:0; right:0; padding:18px 26px 26px;
+    background:linear-gradient(to bottom, rgba(0,0,0,.85), rgba(0,0,0,0)); }
+  .chrome-bottom { position:absolute; bottom:0; left:0; right:0; padding:26px 26px 18px;
+    background:linear-gradient(to top, rgba(0,0,0,.85), rgba(0,0,0,0)); }
   .now-label { font-size:15px; letter-spacing:.18em; color:var(--live); }
-  .now-title { font-size:23px; font-weight:600; line-height:1.2; margin-top:6px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-  .stage { width:600px; height:338px; background:var(--ink); position:relative; }
-  .stage iframe { width:600px; height:338px; border:0; display:block; }
-  .stage-veil { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:var(--ink);
-    font-size:21px; color:var(--cue); text-align:center; padding:0 40px; line-height:1.4; }
-  .stage-veil.show { display:flex; }
-  .transport { padding:18px 28px 0; }
-  .track { height:6px; background:var(--rail); }
-  .track-fill { height:6px; width:0%; background:var(--cue); transition:width 220ms linear; }
-  .readout { display:flex; justify-content:space-between; align-items:center; margin-top:12px; font-size:19px; }
+  .now-title { font-size:22px; font-weight:600; line-height:1.2; margin-top:6px;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+    text-shadow:0 2px 8px rgba(0,0,0,.9); }
+  .track { height:5px; background:rgba(255,255,255,.22); }
+  .track-fill { height:5px; width:0%; background:var(--cue); transition:width 220ms linear; }
+  .readout { display:flex; justify-content:space-between; align-items:center; margin-top:10px; font-size:18px;
+    text-shadow:0 2px 8px rgba(0,0,0,.9); }
   .state { color:var(--live); letter-spacing:.12em; }
   .state.paused { color:var(--muted); }
-  .keys { margin-top:auto; padding:0 28px 22px; font-size:15px; color:var(--muted); line-height:1.6; }
-  .keys b { color:var(--text); font-weight:600; }
+
+  .stage-veil { position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+    background:var(--ink); font-size:21px; color:var(--cue); text-align:center; padding:0 40px; line-height:1.4; }
+  .stage-veil.show { display:flex; }
+
+  /* ---- Gesture diagnostics, on with ?debug=1 ---- */
+  .debug { position:absolute; top:0; right:0; display:none; padding:10px 14px; background:rgba(0,0,0,.85);
+    border-left:3px solid var(--cue); font-size:15px; line-height:1.5; color:var(--cue); text-align:right; z-index:99; }
+  .debug.on { display:block; }
+  .debug .miss { color:var(--live); }
+
   @media (prefers-reduced-motion:reduce) { * { transition:none !important; } }
 </style>
 </head>
 <body>
+
 <section id="listScreen" class="screen active">
   <header><span class="slug mono">RUNDOWN</span><span id="count" class="count mono">--</span></header>
   <div id="rows" class="rows"></div>
   <footer class="mono">SWIPE TO MOVE &nbsp;&middot;&nbsp; PINCH TO PLAY</footer>
 </section>
+
 <section id="playerScreen" class="screen">
-  <div class="now"><div id="nowLabel" class="now-label mono">ON AIR</div><div id="nowTitle" class="now-title">&nbsp;</div></div>
-  <div class="stage"><div id="player"></div><div id="veil" class="stage-veil"></div></div>
-  <div class="transport">
-    <div class="track"><div id="trackFill" class="track-fill"></div></div>
-    <div class="readout mono"><span id="state" class="state">PLAYING</span><span id="time">0:00 / 0:00</span></div>
+  <button id="sink" aria-label="Player controls"></button>
+  <div class="stage"><div id="player"></div></div>
+  <div id="chrome" class="chrome">
+    <div class="chrome-top">
+      <div id="nowLabel" class="now-label mono">ON AIR</div>
+      <div id="nowTitle" class="now-title">&nbsp;</div>
+    </div>
+    <div class="chrome-bottom">
+      <div class="track"><div id="trackFill" class="track-fill"></div></div>
+      <div class="readout mono"><span id="state" class="state">PLAYING</span><span id="time">0:00 / 0:00</span></div>
+    </div>
   </div>
-  <div class="keys"><b>Pinch</b> play or pause &nbsp;&middot;&nbsp; <b>Left / right</b> skip 10s<br>
-    <b>Up / down</b> volume &nbsp;&middot;&nbsp; <b>Middle pinch</b> back to rundown</div>
+  <div id="veil" class="stage-veil"></div>
 </section>
+
+<div id="debug" class="debug mono"></div>
+
 <script>
 (function () {
   'use strict';
-  var POLL_MS = 8000, WINDOW = 5, SEEK_STEP = 10;
+  var POLL_MS = 8000, WINDOW = 5, SEEK_STEP = 10, CHROME_MS = 2500;
+
+  var params = new URLSearchParams(location.search);
+  var DEBUG = params.get('debug') === '1';
+  var ZOOM = params.get('zoom') === 'fill' ? 'fill' : 'fit';
+
   var token=null, items=[], focusIndex=0, windowStart=0;
-  var player=null, playerReady=false, current=null, ticker=null, view='list';
+  var player=null, playerReady=false, current=null;
+  var ticker=null, chromeTimer=null, refocusTimer=null, view='list';
+  var keyCount=0, lastKey='none';
+
   var el={};
-  ['listScreen','playerScreen','rows','count','nowTitle','nowLabel','veil','trackFill','state','time']
+  ['listScreen','playerScreen','rows','count','nowTitle','nowLabel','veil',
+   'trackFill','state','time','chrome','sink','debug']
     .forEach(function(id){ el[id]=document.getElementById(id); });
 
+  /* ---------- diagnostics ---------- */
+  function paintDebug(note){
+    if(!DEBUG) return;
+    el.debug.classList.add('on');
+    var active = document.activeElement;
+    var where = active === el.sink ? 'sink'
+      : active && active.tagName === 'IFRAME' ? '<span class="miss">IFRAME</span>'
+      : active && active.className ? String(active.className).split(' ')[0]
+      : active ? active.tagName.toLowerCase() : 'none';
+    el.debug.innerHTML =
+      'view ' + view + '<br>keys ' + keyCount + '<br>last ' + lastKey +
+      '<br>focus ' + where + (note ? '<br>' + note : '');
+  }
+
+  /* ---------- token ---------- */
   function resolveToken(){
-    var fromUrl=new URLSearchParams(location.search).get('token');
+    var fromUrl = params.get('token');
     if(fromUrl){ try{localStorage.setItem('rundown.token',fromUrl);}catch(e){} return fromUrl; }
     try{ return localStorage.getItem('rundown.token'); }catch(e){ return null; }
   }
@@ -355,6 +415,8 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     var pad=function(n){return n<10?'0'+n:String(n);};
     return h>0 ? h+':'+pad(m)+':'+pad(r) : m+':'+pad(r);
   }
+
+  /* ---------- rundown ---------- */
   function showNotice(head,body){
     el.rows.innerHTML='<div class="notice"><div class="notice-head">'+head+'</div><div class="notice-body">'+body+'</div></div>';
   }
@@ -375,6 +437,7 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     });
     var target=el.rows.querySelector('[data-index="'+focusIndex+'"]');
     if(target){ target.classList.add('focused'); target.focus(); }
+    paintDebug();
   }
   function loadQueue(){
     if(!token){ renderList(); return Promise.resolve(); }
@@ -394,7 +457,33 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     items=items.filter(function(it){return it.id!==id;});
     fetch('/api/queue?token='+encodeURIComponent(token)+'&id='+encodeURIComponent(id),{method:'DELETE'}).catch(function(){});
   }
+
+  /* ---------- focus lock ----------
+     The iframe grabs focus when a video loads. Pinch fires Enter on whatever
+     holds focus, so if we let it drift into the iframe, every gesture lands in
+     YouTube's own UI instead of here. We pull it back, repeatedly. */
+  function holdFocus(){
+    if(view!=='player') return;
+    if(document.activeElement !== el.sink){
+      try{ el.sink.focus({preventScroll:true}); }catch(e){ try{ el.sink.focus(); }catch(e2){} }
+    }
+  }
+  function startFocusGuard(){
+    stopFocusGuard();
+    holdFocus();
+    [80,250,600,1200,2500].forEach(function(delay){ setTimeout(holdFocus,delay); });
+    refocusTimer=setInterval(holdFocus,1500);
+  }
+  function stopFocusGuard(){ if(refocusTimer){ clearInterval(refocusTimer); refocusTimer=null; } }
+
+  /* ---------- chrome ---------- */
+  function showChrome(){
+    el.chrome.classList.remove('hidden');
+    if(chromeTimer) clearTimeout(chromeTimer);
+    chromeTimer=setTimeout(function(){ el.chrome.classList.add('hidden'); },CHROME_MS);
+  }
   function setState(text,live){ el.state.textContent=text; el.state.className='state'+(live?'':' paused'); }
+
   function startTicker(){
     stopTicker();
     ticker=setInterval(function(){
@@ -407,6 +496,14 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     },500);
   }
   function stopTicker(){ if(ticker){ clearInterval(ticker); ticker=null; } }
+
+  function sizeStage(){
+    var frame=document.querySelector('.stage iframe');
+    if(!frame) return;
+    if(ZOOM==='fill'){ frame.style.width='1067px'; frame.style.height='600px'; }
+    else { frame.style.width='600px'; frame.style.height='338px'; }
+  }
+
   function openPlayer(index){
     var item=items[index]; if(!item) return;
     current=item; focusIndex=index; view='player';
@@ -415,10 +512,10 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     setState('CUEING',false); el.trackFill.style.width='0%'; el.time.textContent='0:00 / 0:00';
     history.pushState({screen:'player',id:item.id},'');
     if(playerReady&&player) player.loadVideoById({videoId:item.videoId,startSeconds:item.start||0});
-    startTicker();
+    sizeStage(); startTicker(); showChrome(); startFocusGuard(); paintDebug();
   }
   function closePlayer(){
-    view='list'; stopTicker();
+    view='list'; stopTicker(); stopFocusGuard();
     if(player&&playerReady){ try{player.stopVideo();}catch(e){} }
     el.playerScreen.classList.remove('active'); el.listScreen.classList.add('active');
     renderList();
@@ -432,28 +529,40 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     else if(items.length) openPlayer(Math.max(0,items.length-1));
     else history.back();
   }
+
+  /* ---------- YouTube ---------- */
   window.onYouTubeIframeAPIReady=function(){
     player=new YT.Player('player',{
       width:600,height:338,
-      playerVars:{controls:0,modestbranding:1,rel:0,playsinline:1,iv_load_policy:3,disablekb:1,fs:0},
+      playerVars:{
+        controls:0, modestbranding:1, rel:0, playsinline:1,
+        iv_load_policy:3, disablekb:1, fs:0, origin:location.origin
+      },
       events:{
         onReady:function(){
-          playerReady=true;
-          if(view==='player'&&current) player.loadVideoById({videoId:current.videoId,startSeconds:current.start||0});
+          playerReady=true; sizeStage();
+          if(view==='player'&&current){
+            player.loadVideoById({videoId:current.videoId,startSeconds:current.start||0});
+            startFocusGuard();
+          }
         },
         onStateChange:function(e){
           if(e.data===YT.PlayerState.PLAYING) setState('ON AIR',true);
           else if(e.data===YT.PlayerState.PAUSED) setState('HELD',false);
           else if(e.data===YT.PlayerState.BUFFERING) setState('LOADING',false);
           else if(e.data===YT.PlayerState.ENDED){ setState('DONE',false); playNext(); }
+          holdFocus(); paintDebug();
         },
         onError:function(){
-          el.veil.textContent="This video won't play outside YouTube. Middle pinch to go back.";
-          el.veil.classList.add('show'); setState('BLOCKED',false);
+          el.veil.textContent="This video won't play outside YouTube. Skipping in a moment.";
+          el.veil.classList.add('show'); setState('BLOCKED',false); showChrome();
+          setTimeout(function(){ if(view==='player') playNext(); },4000);
         }
       }
     });
   };
+
+  /* ---------- input ---------- */
   function moveFocus(delta){ if(!items.length) return; focusIndex=(focusIndex+delta+items.length)%items.length; renderList(); }
   function nudgeVolume(delta){
     if(!player||!playerReady) return;
@@ -464,12 +573,18 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
       setTimeout(function(){ el.nowLabel.textContent='ON AIR'; },1200);
     }catch(e){}
   }
-  function seek(delta){ if(!player||!playerReady) return; try{ player.seekTo(Math.max(0,(player.getCurrentTime()||0)+delta),true); }catch(e){} }
+  function seek(delta){
+    if(!player||!playerReady) return;
+    try{ player.seekTo(Math.max(0,(player.getCurrentTime()||0)+delta),true); }catch(e){}
+  }
   function togglePlay(){
     if(!player||!playerReady) return;
     try{ var s=player.getPlayerState(); if(s===YT.PlayerState.PLAYING) player.pauseVideo(); else player.playVideo(); }catch(e){}
   }
-  document.addEventListener('keydown',function(e){
+
+  // Capture phase, on window, so we see the event before anything else can.
+  window.addEventListener('keydown',function(e){
+    keyCount++; lastKey=e.key;
     var handled=true;
     if(view==='list'){
       switch(e.key){
@@ -479,6 +594,7 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
         default: handled=false;
       }
     } else {
+      showChrome();
       switch(e.key){
         case 'Enter': togglePlay(); break;
         case 'ArrowLeft': seek(-SEEK_STEP); break;
@@ -488,17 +604,28 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
         case 'Escape': case 'Backspace': history.back(); break;
         default: handled=false;
       }
+      holdFocus();
     }
-    if(handled) e.preventDefault();
-  });
+    paintDebug();
+    if(handled){ e.preventDefault(); e.stopPropagation(); }
+  },true);
+
+  // If focus escapes into the iframe, snatch it straight back.
+  window.addEventListener('blur',function(){ setTimeout(holdFocus,50); });
+  document.addEventListener('focusout',function(){ setTimeout(holdFocus,50); });
+  document.addEventListener('visibilitychange',function(){ if(!document.hidden) holdFocus(); });
+
   window.addEventListener('popstate',function(event){
     var screen=event.state&&event.state.screen;
     if(screen==='player') return;
     if(view==='player') closePlayer();
   });
+
+  /* ---------- boot ---------- */
   token=resolveToken();
   history.replaceState({screen:'list'},'');
   renderList();
+  if(DEBUG) paintDebug();
   var tag=document.createElement('script');
   tag.src='https://www.youtube.com/iframe_api';
   document.head.appendChild(tag);
