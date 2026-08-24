@@ -731,6 +731,7 @@ const PHONE_PAGE = String.raw`<!DOCTYPE html>
   h1 { font-size:20px; letter-spacing:.16em; font-weight:700; }
   .count { color:var(--cue); font-size:16px; }
   .compose { margin:24px 0 8px; }
+  .paste { width:100%; padding:20px; font-size:17px; margin-bottom:20px; }
   label { display:block; font-size:13px; letter-spacing:.1em; color:var(--muted); margin-bottom:10px; }
   .field { display:flex; gap:10px; }
   input[type="url"] { flex:1; min-width:0; background:var(--panel); border:2px solid var(--rail); color:var(--text);
@@ -762,7 +763,8 @@ const PHONE_PAGE = String.raw`<!DOCTYPE html>
 <div class="wrap">
   <header><h1 class="mono">SEND TO GLASSES</h1><span id="count" class="count mono">--</span></header>
   <div class="compose">
-    <label class="mono" for="url">PASTE A YOUTUBE LINK</label>
+    <button id="paste" class="paste mono">PASTE LINK AND QUEUE</button>
+    <label class="mono" for="url">OR TYPE IT IN</label>
     <div class="field">
       <input type="url" id="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="youtube.com/watch?v=...">
       <button id="send" class="mono">QUEUE</button>
@@ -780,7 +782,7 @@ const PHONE_PAGE = String.raw`<!DOCTYPE html>
   'use strict';
   var token=null, items=[];
   var el={};
-  ['url','send','status','items','count','clear','setup'].forEach(function(id){ el[id]=document.getElementById(id); });
+  ['url','send','status','items','count','clear','setup','paste'].forEach(function(id){ el[id]=document.getElementById(id); });
 
   function say(message,kind){ el.status.textContent=message||''; el.status.className='status'+(kind?' '+kind:''); }
   function esc(v){ return String(v==null?'':v).replace(/[&<>"']/g,function(c){
@@ -826,6 +828,24 @@ const PHONE_PAGE = String.raw`<!DOCTYPE html>
       .catch(function(e){ say(e.message,'bad'); });
   }
   el.send.addEventListener('click',function(){ add(el.url.value); });
+
+  // Reading the clipboard needs a real tap, and iOS shows its own Paste
+  // confirmation. If it is blocked, fall back to the text field.
+  el.paste.addEventListener('click',function(){
+    if(!navigator.clipboard || !navigator.clipboard.readText){
+      say('This browser will not hand over the clipboard. Long press the box below and choose Paste.','bad');
+      el.url.focus(); return;
+    }
+    say('Reading clipboard...');
+    navigator.clipboard.readText().then(function(text){
+      var link=(text||'').trim();
+      if(!link){ say('Clipboard is empty. Copy a YouTube link first.','bad'); return; }
+      el.url.value=link; add(link);
+    }).catch(function(){
+      say('Clipboard access was declined. Long press the box below and choose Paste.','bad');
+      el.url.focus();
+    });
+  });
   el.url.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); add(el.url.value); } });
   el.clear.addEventListener('click',function(){
     if(!items.length) return;
@@ -908,6 +928,48 @@ function readBody(req) {
   });
 }
 
+// Adds one link to the queue. Shared by POST (JSON body) and GET (query
+// string), so a Shortcut can just append the link to the URL.
+async function addToQueue(token, source, rawQuery) {
+  let videoId = parseVideoId(source);
+
+  // A link appended to a URL gets its own query string chopped up by the
+  // parser, so as a fallback we scan the whole raw query for a video id.
+  if (!videoId && rawQuery) {
+    const match = decodeURIComponent(rawQuery).match(
+      /(?:youtu\.be\/|watch\?v=|\/shorts\/|\/embed\/|\/live\/|[?&]v=)([\w-]{11})/,
+    );
+    if (match) videoId = match[1];
+  }
+
+  if (!videoId) return {status: 422, body: {error: "That link doesn't contain a YouTube video."}};
+
+  const items = await readQueue(token);
+  if (items.some((item) => item.videoId === videoId)) {
+    return {status: 200, body: {items, duplicate: true}};
+  }
+
+  // The timestamp may have been split off into its own query param.
+  let start = parseStartSeconds(source);
+  if (!start && rawQuery) {
+    const stray = decodeURIComponent(rawQuery).match(/[?&](?:t|start)=(\d+)/);
+    if (stray) start = Number(stray[1]);
+  }
+
+  const meta = await fetchMeta(videoId);
+  const entry = {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+    videoId,
+    start,
+    title: meta.title || 'Untitled video',
+    channel: meta.channel || '',
+    addedAt: Date.now(),
+  };
+  const next = [...items, entry].slice(-MAX_ITEMS);
+  await writeQueue(token, next);
+  return {status: 201, body: {items: next, added: entry}};
+}
+
 async function handleQueue(req, res, url) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -925,34 +987,37 @@ async function handleQueue(req, res, url) {
 
   try {
     if (req.method === 'GET') {
+      // A link on the query string means "add this", so an iOS Shortcut can be
+      // a single action with no request body to configure.
+      const shared =
+        url.searchParams.get('add') ||
+        url.searchParams.get('url') ||
+        url.searchParams.get('text');
+
+      if (shared) {
+        const result = await addToQueue(token, shared, url.search);
+        const added = result.body.added;
+        const line = added
+          ? `Queued: ${added.title}`
+          : result.body.duplicate
+            ? 'Already in the rundown.'
+            : result.body.error || 'Could not queue that.';
+        // Plain text so the Shortcut banner shows something readable.
+        res.writeHead(result.status, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Access-Control-Allow-Origin': '*',
+        });
+        return res.end(line);
+      }
+
       return sendJson(res, 200, {items: await readQueue(token), persistent: Boolean(redis)});
     }
 
     if (req.method === 'POST') {
       const body = await readBody(req);
-      const source = body.url || body.text || '';
-      const videoId = parseVideoId(source);
-      if (!videoId) {
-        return sendJson(res, 422, {error: "That link doesn't contain a YouTube video."});
-      }
-
-      const items = await readQueue(token);
-      if (items.some((item) => item.videoId === videoId)) {
-        return sendJson(res, 200, {items, duplicate: true});
-      }
-
-      const meta = await fetchMeta(videoId);
-      const entry = {
-        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-        videoId,
-        start: parseStartSeconds(source),
-        title: meta.title || 'Untitled video',
-        channel: meta.channel || '',
-        addedAt: Date.now(),
-      };
-      const next = [...items, entry].slice(-MAX_ITEMS);
-      await writeQueue(token, next);
-      return sendJson(res, 201, {items: next, added: entry});
+      const result = await addToQueue(token, body.url || body.text || '', url.search);
+      return sendJson(res, result.status, result.body);
     }
 
     if (req.method === 'DELETE') {
