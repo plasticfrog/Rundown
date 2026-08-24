@@ -314,6 +314,13 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
   /* Nothing inside the iframe can be clicked or focused. All control goes
      through the player API instead, so YouTube's own UI is unreachable. */
   .stage iframe { border:0; display:block; pointer-events:none; }
+  /* Blackout fades the picture without unmounting the player, so audio never
+     stops and coming back is instant. Pure black reads as transparent here. */
+  .stage { transition:opacity 250ms ease; }
+  #playerScreen.blackout .stage { opacity:0; }
+  .dot { position:absolute; right:16px; bottom:14px; width:9px; height:9px; border-radius:50%;
+    background:var(--cue); opacity:.45; display:none; }
+  #playerScreen.blackout .dot { display:block; }
 
   .chrome { position:absolute; inset:0; pointer-events:none; opacity:1; transition:opacity 400ms ease; }
   .chrome.hidden { opacity:0; }
@@ -368,6 +375,7 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     </div>
   </div>
   <div id="veil" class="stage-veil"></div>
+  <div id="dot" class="dot"></div>
 </section>
 
 <div id="debug" class="debug mono"></div>
@@ -375,7 +383,15 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
 <script>
 (function () {
   'use strict';
-  var POLL_MS = 8000, WINDOW = 5, SEEK_STEP = 10, CHROME_MS = 2500;
+  var POLL_MS = 8000, WINDOW = 5, SEEK_STEP = 10, CHROME_MS = 2500, BLACKOUT_CHROME_MS = 1500;
+  var DOUBLE_PINCH_MS = 400;
+
+  // Audio only: the player keeps running, we just stop painting it. Remembered
+  // across videos and sessions, since it is a mode rather than a one-off.
+  var audioOnly = (function(){
+    try{ return localStorage.getItem('rundown.audioOnly')==='1'; }catch(e){ return false; }
+  })();
+  var lastPinchAt = 0;
 
   var params = new URLSearchParams(location.search);
   var DEBUG = params.get('debug') === '1';
@@ -405,7 +421,7 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
 
   var el={};
   ['listScreen','playerScreen','rows','count','nowTitle','nowLabel','veil','listHint',
-   'trackFill','state','time','rate','chrome','sink','debug']
+   'trackFill','state','time','rate','chrome','sink','debug','dot']
     .forEach(function(id){ el[id]=document.getElementById(id); });
 
   /* ---------- diagnostics ---------- */
@@ -546,7 +562,35 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
   function showChrome(){
     el.chrome.classList.remove('hidden');
     if(chromeTimer) clearTimeout(chromeTimer);
-    chromeTimer=setTimeout(function(){ el.chrome.classList.add('hidden'); },CHROME_MS);
+    chromeTimer=setTimeout(function(){ el.chrome.classList.add('hidden'); },
+      audioOnly ? BLACKOUT_CHROME_MS : CHROME_MS);
+  }
+
+  /* ---------- audio only ----------
+     Stops painting the video. The iframe keeps playing, so nothing rebuffers
+     and coming back is instant. */
+  function applyAudioOnly(){
+    if(audioOnly){
+      el.playerScreen.classList.add('blackout');
+      el.chrome.classList.add('hidden');
+      if(chromeTimer){ clearTimeout(chromeTimer); chromeTimer=null; }
+    } else {
+      el.playerScreen.classList.remove('blackout');
+      showChrome();
+    }
+  }
+  function toggleAudioOnly(){
+    audioOnly=!audioOnly;
+    try{ localStorage.setItem('rundown.audioOnly', audioOnly?'1':'0'); }catch(e){}
+    applyAudioOnly();
+    // Confirm the change, then get out of the way.
+    el.chrome.classList.remove('hidden');
+    el.nowLabel.textContent = audioOnly ? 'AUDIO ONLY' : 'VIDEO ON';
+    if(chromeTimer) clearTimeout(chromeTimer);
+    chromeTimer=setTimeout(function(){
+      el.nowLabel.textContent='ON AIR';
+      el.chrome.classList.add('hidden');
+    }, 1400);
   }
   function setState(text,live){ el.state.textContent=text; el.state.className='state'+(live?'':' paused'); }
 
@@ -628,6 +672,7 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     history.pushState({screen:'player',id:item.id},'');
     if(playerReady&&player) player.loadVideoById({videoId:item.videoId,startSeconds:resumeAt});
     sizeStage(); startTicker(); showChrome(); startFocusGuard(); paintDebug();
+    applyAudioOnly();
     if(resumeAt>10){
       el.nowLabel.textContent='RESUMED '+clockFace(resumeAt);
       setTimeout(function(){ el.nowLabel.textContent='ON AIR'; },2000);
@@ -804,7 +849,19 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     } else {
       showChrome();
       switch(e.key){
-        case 'Enter': togglePlay(); break;
+        case 'Enter':
+          // Single pinch acts immediately so play/pause never feels laggy. A
+          // second pinch inside the window undoes it and toggles blackout.
+          var now=Date.now();
+          if(now-lastPinchAt < DOUBLE_PINCH_MS){
+            lastPinchAt=0;
+            togglePlay();        // revert the toggle the first pinch caused
+            toggleAudioOnly();
+          } else {
+            lastPinchAt=now;
+            togglePlay();
+          }
+          break;
         case 'ArrowLeft': scrub(-1); break;
         case 'ArrowRight': scrub(1); break;
         case 'ArrowUp':
