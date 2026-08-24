@@ -328,6 +328,7 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     text-shadow:0 2px 8px rgba(0,0,0,.9); }
   .state { color:var(--live); letter-spacing:.12em; }
   .state.paused { color:var(--muted); }
+  .rate { color:var(--cue); letter-spacing:.06em; }
 
   .stage-veil { position:absolute; inset:0; display:none; align-items:center; justify-content:center;
     background:var(--ink); font-size:21px; color:var(--cue); text-align:center; padding:0 40px; line-height:1.4; }
@@ -360,7 +361,7 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     </div>
     <div class="chrome-bottom">
       <div class="track"><div id="trackFill" class="track-fill"></div></div>
-      <div class="readout mono"><span id="state" class="state">PLAYING</span><span id="time">0:00 / 0:00</span></div>
+      <div class="readout mono"><span id="state" class="state">PLAYING</span><span id="rate" class="rate">1.0x</span><span id="time">0:00 / 0:00</span></div>
     </div>
   </div>
   <div id="veil" class="stage-veil"></div>
@@ -376,6 +377,23 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
   var params = new URLSearchParams(location.search);
   var DEBUG = params.get('debug') === '1';
   var ZOOM = params.get('zoom') === 'fill' ? 'fill' : 'fit';
+  // Up/down swipes drive playback speed by default. Pass ?updown=volume to
+  // use them for volume instead.
+  var UPDOWN = params.get('updown') === 'volume' ? 'volume' : 'speed';
+
+  var SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+  var speed = (function(){
+    var fromUrl = parseFloat(params.get('speed'));
+    if (fromUrl && SPEEDS.indexOf(fromUrl) !== -1) {
+      try{ localStorage.setItem('rundown.speed', String(fromUrl)); }catch(e){}
+      return fromUrl;
+    }
+    try {
+      var saved = parseFloat(localStorage.getItem('rundown.speed'));
+      if (saved && SPEEDS.indexOf(saved) !== -1) return saved;
+    } catch(e){}
+    return 2;
+  })();
 
   var token=null, items=[], focusIndex=0, windowStart=0;
   var player=null, playerReady=false, current=null;
@@ -384,7 +402,7 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
 
   var el={};
   ['listScreen','playerScreen','rows','count','nowTitle','nowLabel','veil',
-   'trackFill','state','time','chrome','sink','debug']
+   'trackFill','state','time','rate','chrome','sink','debug']
     .forEach(function(id){ el[id]=document.getElementById(id); });
 
   /* ---------- diagnostics ---------- */
@@ -484,6 +502,52 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
   }
   function setState(text,live){ el.state.textContent=text; el.state.className='state'+(live?'':' paused'); }
 
+  /* ---------- captions ----------
+     YouTube turns captions back on per video depending on the channel's
+     settings, and the module can load a beat after playback starts, so we
+     unload it repeatedly rather than once. */
+  function killCaptions(){
+    if(!player) return;
+    ['captions','cc'].forEach(function(module){
+      try{ player.unloadModule(module); }catch(e){}
+    });
+  }
+  function killCaptionsHard(){
+    killCaptions();
+    [200,600,1500,3000].forEach(function(delay){ setTimeout(killCaptions,delay); });
+  }
+
+  /* ---------- playback speed ----------
+     Rate resets to 1x on every load, so it gets reapplied each time. Some
+     videos only offer a subset of rates, so we fall back to the nearest. */
+  function paintRate(){
+    if(el.rate) el.rate.textContent = speed.toFixed(2).replace(/0$/,'').replace(/\.$/,'') + 'x';
+  }
+  function applySpeed(){
+    if(!player||!playerReady) return;
+    try{
+      var available = player.getAvailablePlaybackRates() || [];
+      var target = speed;
+      if(available.length && available.indexOf(target) === -1){
+        target = available.reduce(function(best,rate){
+          return Math.abs(rate-speed) < Math.abs(best-speed) ? rate : best;
+        }, available[0]);
+      }
+      player.setPlaybackRate(target);
+    }catch(e){}
+    paintRate();
+  }
+  function nudgeSpeed(direction){
+    var index = SPEEDS.indexOf(speed);
+    if(index === -1) index = SPEEDS.indexOf(1);
+    index = Math.max(0, Math.min(SPEEDS.length-1, index + direction));
+    speed = SPEEDS[index];
+    try{ localStorage.setItem('rundown.speed', String(speed)); }catch(e){}
+    applySpeed();
+    el.nowLabel.textContent = 'SPEED ' + speed + 'x';
+    setTimeout(function(){ el.nowLabel.textContent='ON AIR'; },1200);
+  }
+
   function startTicker(){
     stopTicker();
     ticker=setInterval(function(){
@@ -536,23 +600,29 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
       width:600,height:338,
       playerVars:{
         controls:0, modestbranding:1, rel:0, playsinline:1,
-        iv_load_policy:3, disablekb:1, fs:0, origin:location.origin
+        iv_load_policy:3, disablekb:1, fs:0, cc_load_policy:0,
+        origin:location.origin
       },
       events:{
         onReady:function(){
-          playerReady=true; sizeStage();
+          playerReady=true; sizeStage(); killCaptionsHard(); paintRate();
           if(view==='player'&&current){
             player.loadVideoById({videoId:current.videoId,startSeconds:current.start||0});
             startFocusGuard();
           }
         },
         onStateChange:function(e){
-          if(e.data===YT.PlayerState.PLAYING) setState('ON AIR',true);
+          if(e.data===YT.PlayerState.PLAYING){
+            setState('ON AIR',true);
+            applySpeed();       // rate resets on each load
+            killCaptionsHard(); // so does the caption track
+          }
           else if(e.data===YT.PlayerState.PAUSED) setState('HELD',false);
-          else if(e.data===YT.PlayerState.BUFFERING) setState('LOADING',false);
+          else if(e.data===YT.PlayerState.BUFFERING){ setState('LOADING',false); killCaptions(); }
           else if(e.data===YT.PlayerState.ENDED){ setState('DONE',false); playNext(); }
           holdFocus(); paintDebug();
         },
+        onPlaybackRateChange:function(){ paintRate(); },
         onError:function(){
           el.veil.textContent="This video won't play outside YouTube. Skipping in a moment.";
           el.veil.classList.add('show'); setState('BLOCKED',false); showChrome();
@@ -599,8 +669,12 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
         case 'Enter': togglePlay(); break;
         case 'ArrowLeft': seek(-SEEK_STEP); break;
         case 'ArrowRight': seek(SEEK_STEP); break;
-        case 'ArrowUp': nudgeVolume(10); break;
-        case 'ArrowDown': nudgeVolume(-10); break;
+        case 'ArrowUp':
+          if(UPDOWN==='volume') nudgeVolume(10); else nudgeSpeed(1);
+          break;
+        case 'ArrowDown':
+          if(UPDOWN==='volume') nudgeVolume(-10); else nudgeSpeed(-1);
+          break;
         case 'Escape': case 'Backspace': history.back(); break;
         default: handled=false;
       }
