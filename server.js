@@ -1028,182 +1028,392 @@ const PROBE_PAGE = String.raw`<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=600, height=600, initial-scale=1.0, user-scalable=no">
 <meta name="mrbd-web-app-capable" content="yes">
-<title>Rundown Probe</title>
+<title>Probe</title>
 <style>
   :root { --ink:#000; --cue:#FFB000; --pass:#3DDC84; --fail:#FF4436; --text:#FFF; --muted:#8E9A97; --rail:#2A312F; }
   * { margin:0; padding:0; box-sizing:border-box; }
   html,body { width:600px; min-height:600px; background:var(--ink); color:var(--text);
     font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; }
-  body { padding:0 0 40px; }
+  body { position:relative; padding-bottom:30px; }
   .mono { font-family:"SF Mono","Roboto Mono",Menlo,Consolas,monospace; letter-spacing:.04em; }
-  header { padding:22px 24px 14px; border-bottom:2px solid var(--rail); }
-  h1 { font-size:24px; letter-spacing:.14em; font-weight:700; }
-  .sub { font-size:15px; color:var(--muted); margin-top:6px; }
-  .group { padding:16px 24px 6px; font-size:14px; letter-spacing:.16em; color:var(--cue); }
-  .line { display:flex; align-items:flex-start; gap:12px; padding:9px 24px; font-size:17px; line-height:1.35; }
-  .mark { width:60px; flex-shrink:0; font-weight:700; }
-  .yes { color:var(--pass); }
-  .no { color:var(--fail); }
-  .maybe { color:var(--cue); }
-  .what { flex:1; min-width:0; }
-  .note { display:block; font-size:14px; color:var(--muted); margin-top:2px; word-break:break-word; }
-  .verdict { margin:22px 24px 0; padding:16px; border-left:5px solid var(--cue); background:rgba(255,176,0,.1);
-    font-size:17px; line-height:1.45; }
-  video { display:none; }
+  header { padding:24px 24px 16px; border-bottom:2px solid var(--rail); }
+  h1 { font-size:26px; letter-spacing:.14em; font-weight:700; }
+  .sub { font-size:16px; color:var(--muted); margin-top:8px; line-height:1.4; }
+  .stage { padding:40px 24px; }
+  .big { font-size:22px; line-height:1.5; }
+  .code { font-size:56px; letter-spacing:.2em; color:var(--cue); font-weight:700; margin:24px 0 16px; }
+  .ok { color:var(--pass); }
+  .bad { color:var(--fail); }
+  .step { font-size:19px; color:var(--muted); line-height:1.5; margin-top:20px; }
+  .step b { color:var(--text); }
+  .bar { height:6px; background:var(--rail); margin-top:28px; }
+  .bar-fill { height:6px; width:0%; background:var(--cue); transition:width 200ms linear; }
+  .tally { font-size:18px; color:var(--muted); margin-top:12px; }
 </style>
 </head>
 <body>
 <header>
-  <h1 class="mono">MEDIA PROBE</h1>
-  <div class="sub">What this runtime can actually play.</div>
+  <h1 class="mono">PROBE</h1>
+  <div class="sub">Measuring what this device can do, then sending it up.</div>
 </header>
-<div id="out"></div>
-<div id="verdict" class="verdict" style="display:none"></div>
-<video id="v" playsinline muted></video>
+<div class="stage">
+  <div id="status" class="big">Running tests...</div>
+  <div class="bar"><div id="bar" class="bar-fill"></div></div>
+  <div id="tally" class="tally mono"></div>
+  <div id="code" class="code mono"></div>
+  <div id="step" class="step"></div>
+</div>
 
 <script>
 (function(){
   'use strict';
-  var out=document.getElementById('out');
-  var results={};
+  var params=new URLSearchParams(location.search);
+  var token=(params.get('token')||'probe').trim();
+  var report={ takenAt:new Date().toISOString(), sections:{} };
+  var el={};
+  ['status','bar','tally','code','step'].forEach(function(id){ el[id]=document.getElementById(id); });
 
-  function group(name){
-    var d=document.createElement('div');
-    d.className='group mono'; d.textContent=name; out.appendChild(d);
+  function put(section,key,value){
+    if(!report.sections[section]) report.sections[section]={};
+    report.sections[section][key]=value;
   }
-  function line(key,state,label,note){
-    results[key]=state;
-    var d=document.createElement('div');
-    d.className='line';
-    var cls = state===true?'yes':state===false?'no':'maybe';
-    var mark = state===true?'YES':state===false?'NO':'~';
-    d.innerHTML='<span class="mark mono '+cls+'">'+mark+'</span><span class="what">'+label+
-      (note?'<span class="note">'+note+'</span>':'')+'</span>';
-    out.appendChild(d);
+  function progress(pct,note){
+    el.bar.style.width=pct+'%';
+    if(note) el.tally.textContent=note;
   }
 
-  var video=document.getElementById('v');
-  function canPlay(type){
-    var r=video.canPlayType(type);
-    return r==='probably' ? true : r==='maybe' ? null : false;
+  /* ---------- identity ---------- */
+  put('device','userAgent',navigator.userAgent);
+  put('device','platform',navigator.platform||'');
+  put('device','vendor',navigator.vendor||'');
+  put('device','languages',(navigator.languages||[]).join(','));
+  put('device','cores',navigator.hardwareConcurrency||null);
+  put('device','memoryGB',navigator.deviceMemory||null);
+  put('device','touchPoints',navigator.maxTouchPoints||0);
+  put('device','screen',screen.width+'x'+screen.height);
+  put('device','viewport',window.innerWidth+'x'+window.innerHeight);
+  put('device','pixelRatio',window.devicePixelRatio||1);
+  put('device','colorDepth',screen.colorDepth||null);
+  put('device','timezone',(Intl.DateTimeFormat().resolvedOptions().timeZone)||'');
+  put('device','online',navigator.onLine);
+
+  var conn=navigator.connection||navigator.mozConnection||navigator.webkitConnection;
+  if(conn){
+    put('network','effectiveType',conn.effectiveType||'');
+    put('network','downlinkMbps',conn.downlink||null);
+    put('network','rttMs',conn.rtt||null);
+    put('network','saveData',!!conn.saveData);
+  } else {
+    put('network','info','Network Information API unavailable');
   }
-  function mseType(type){
-    return (window.MediaSource && MediaSource.isTypeSupported) ? MediaSource.isTypeSupported(type) : false;
-  }
 
-  /* ---- basics ---- */
-  group('FOUNDATIONS');
-  line('mse', !!window.MediaSource, 'Media Source Extensions',
-    'Needed for any adaptive stream: HLS, DASH, live video.');
-  line('eme', !!(navigator.requestMediaKeySystemAccess), 'Encrypted Media Extensions',
-    'The browser hook DRM plugs into. Without it, no protected stream can play at all.');
-  line('hlsNative', canPlay('application/vnd.apple.mpegurl'), 'Native HLS playback',
-    'Lets a plain .m3u8 go straight into a video tag.');
-  line('fetch', !!window.fetch, 'Fetch', 'For pulling manifests and segments.');
+  /* ---------- platform features ---------- */
+  put('features','MediaSource',!!window.MediaSource);
+  put('features','ManagedMediaSource',!!window.ManagedMediaSource);
+  put('features','EME',!!navigator.requestMediaKeySystemAccess);
+  put('features','MediaCapabilities',!!(navigator.mediaCapabilities&&navigator.mediaCapabilities.decodingInfo));
+  put('features','WebRTC',!!window.RTCPeerConnection);
+  put('features','WebSocket',!!window.WebSocket);
+  put('features','ServiceWorker',!!navigator.serviceWorker);
+  put('features','WebAssembly',typeof WebAssembly!=='undefined');
+  put('features','WebGL',(function(){ try{ return !!document.createElement('canvas').getContext('webgl'); }catch(e){ return false; } })());
+  put('features','WebGL2',(function(){ try{ return !!document.createElement('canvas').getContext('webgl2'); }catch(e){ return false; } })());
+  put('features','WebCodecs',!!(window.VideoDecoder&&window.VideoEncoder));
+  put('features','MediaRecorder',!!window.MediaRecorder);
+  put('features','WakeLock',!!(navigator.wakeLock));
+  put('features','MediaSession',!!navigator.mediaSession);
+  put('features','Fullscreen',!!(document.documentElement.requestFullscreen));
+  put('features','PictureInPicture',!!document.pictureInPictureEnabled);
+  put('features','DeviceMotion',typeof DeviceMotionEvent!=='undefined');
+  put('features','DeviceOrientation',typeof DeviceOrientationEvent!=='undefined');
+  put('features','Geolocation',!!navigator.geolocation);
+  put('features','Vibration',!!navigator.vibrate);
+  put('features','Battery',!!navigator.getBattery);
+  put('features','Clipboard',!!(navigator.clipboard&&navigator.clipboard.readText));
+  put('features','SharedWorker',typeof SharedWorker!=='undefined');
+  put('features','OffscreenCanvas',typeof OffscreenCanvas!=='undefined');
+  put('features','localStorage',(function(){ try{ localStorage.setItem('_p','1'); localStorage.removeItem('_p'); return true; }catch(e){ return false; } })());
 
-  /* ---- codecs ---- */
-  group('CODECS');
-  line('h264', canPlay('video/mp4; codecs="avc1.42E01E"'), 'H.264 baseline');
-  line('h264high', canPlay('video/mp4; codecs="avc1.640028"'), 'H.264 high profile', 'What most live sports use.');
-  line('hevc', canPlay('video/mp4; codecs="hvc1.1.6.L93.B0"'), 'HEVC / H.265');
-  line('vp9', canPlay('video/webm; codecs="vp9"'), 'VP9');
-  line('av1', canPlay('video/mp4; codecs="av01.0.05M.08"'), 'AV1');
-  line('aac', canPlay('audio/mp4; codecs="mp4a.40.2"'), 'AAC audio');
-  line('mseH264', mseType('video/mp4; codecs="avc1.640028"'), 'H.264 through MSE',
-    'Adaptive streaming needs this specifically, not just the video tag.');
+  progress(15,'device and features');
 
-  /* ---- DRM, the actual question ---- */
-  group('DRM SYSTEMS');
+  /* ---------- codecs ---------- */
+  var probeVideo=document.createElement('video');
+  var codecs={
+    'H.264 baseline':'video/mp4; codecs="avc1.42E01E"',
+    'H.264 main':'video/mp4; codecs="avc1.4D401F"',
+    'H.264 high':'video/mp4; codecs="avc1.640028"',
+    'HEVC main':'video/mp4; codecs="hvc1.1.6.L93.B0"',
+    'HEVC hev1':'video/mp4; codecs="hev1.1.6.L93.B0"',
+    'VP8':'video/webm; codecs="vp8"',
+    'VP9':'video/webm; codecs="vp9"',
+    'VP9 mp4':'video/mp4; codecs="vp09.00.10.08"',
+    'AV1':'video/mp4; codecs="av01.0.05M.08"',
+    'MPEG-2 TS':'video/mp2t; codecs="avc1.42E01E,mp4a.40.2"',
+    'AAC-LC':'audio/mp4; codecs="mp4a.40.2"',
+    'AAC-HE':'audio/mp4; codecs="mp4a.40.5"',
+    'MP3':'audio/mpeg',
+    'Opus':'audio/webm; codecs="opus"',
+    'FLAC':'audio/flac',
+    'HLS manifest':'application/vnd.apple.mpegurl',
+    'DASH manifest':'application/dash+xml'
+  };
+  Object.keys(codecs).forEach(function(name){
+    var type=codecs[name];
+    var tag=probeVideo.canPlayType(type);
+    var mse=(window.MediaSource&&MediaSource.isTypeSupported)?MediaSource.isTypeSupported(type):false;
+    put('codecs',name,{videoTag:tag||'no',mse:mse});
+  });
 
-  var config=[{
-    initDataTypes:['cenc'],
-    videoCapabilities:[{contentType:'video/mp4; codecs="avc1.42E01E"'}],
-    audioCapabilities:[{contentType:'audio/mp4; codecs="mp4a.40.2"'}]
-  }];
+  progress(35,'codecs');
 
-  var systems=[
-    ['widevine','com.widevine.alpha','Widevine','Google. What MLB.TV, Netflix and most services use on Android and Chrome.'],
-    ['fairplay','com.apple.fps','FairPlay','Apple. Safari and iOS only.'],
-    ['fairplay1','com.apple.fps.1_0','FairPlay 1.0',''],
-    ['playready','com.microsoft.playready','PlayReady','Microsoft. Windows and smart TVs.'],
-    ['clearkey','org.w3.clearkey','Clear Key','Unencrypted test system. Presence proves EME works even if no real DRM is installed.']
+  /* ---------- DRM, at several robustness levels ---------- */
+  var drmSystems=[
+    ['Widevine','com.widevine.alpha'],
+    ['Widevine L1 hint','com.widevine.alpha.experiment'],
+    ['FairPlay','com.apple.fps'],
+    ['FairPlay 1.0','com.apple.fps.1_0'],
+    ['FairPlay 2.0','com.apple.fps.2_0'],
+    ['PlayReady','com.microsoft.playready'],
+    ['PlayReady recommendation','com.microsoft.playready.recommendation'],
+    ['ClearKey','org.w3.clearkey'],
+    ['WisePlay','com.huawei.wiseplay']
   ];
+  var robustness=['','SW_SECURE_CRYPTO','SW_SECURE_DECODE','HW_SECURE_CRYPTO','HW_SECURE_DECODE','HW_SECURE_ALL'];
 
-  function probeDrm(index){
-    if(index>=systems.length){ return finish(); }
-    var s=systems[index];
+  function drmConfig(rob){
+    return [{
+      initDataTypes:['cenc','keyids','webm'],
+      videoCapabilities:[{contentType:'video/mp4; codecs="avc1.42E01E"',robustness:rob}],
+      audioCapabilities:[{contentType:'audio/mp4; codecs="mp4a.40.2"'}]
+    }];
+  }
+
+  function testDrm(index,done){
+    if(index>=drmSystems.length) return done();
+    var name=drmSystems[index][0], id=drmSystems[index][1];
     if(!navigator.requestMediaKeySystemAccess){
-      line(s[0], false, s[2], s[3]);
-      return probeDrm(index+1);
+      put('drm',name,'no EME');
+      return testDrm(index+1,done);
     }
-    navigator.requestMediaKeySystemAccess(s[1], config).then(function(access){
-      var level='';
-      try{
-        var c=access.getConfiguration();
-        var robust=(c.videoCapabilities&&c.videoCapabilities[0]&&c.videoCapabilities[0].robustness)||'';
-        level=robust?(' Robustness: '+robust+'.'):'';
-      }catch(e){}
-      line(s[0], true, s[2], s[3]+level);
-      probeDrm(index+1);
+    var levels=[];
+    var r=0;
+    function nextLevel(){
+      if(r>=robustness.length){
+        put('drm',name, levels.length?levels.join(', '):'refused');
+        return testDrm(index+1,done);
+      }
+      var rob=robustness[r++];
+      navigator.requestMediaKeySystemAccess(id, drmConfig(rob))
+        .then(function(){ levels.push(rob||'default'); nextLevel(); })
+        .catch(function(){ nextLevel(); });
+    }
+    nextLevel();
+  }
+
+  /* ---------- decoding performance hints ---------- */
+  function testMediaCapabilities(done){
+    if(!(navigator.mediaCapabilities&&navigator.mediaCapabilities.decodingInfo)){
+      put('decoding','info','MediaCapabilities unavailable');
+      return done();
+    }
+    var trials=[
+      ['H.264 720p30','video/mp4; codecs="avc1.640028"',1280,720,30,3000000],
+      ['H.264 1080p60','video/mp4; codecs="avc1.640028"',1920,1080,60,6000000],
+      ['HEVC 1080p30','video/mp4; codecs="hvc1.1.6.L93.B0"',1920,1080,30,4000000],
+      ['AV1 1080p30','video/mp4; codecs="av01.0.05M.08"',1920,1080,30,3000000]
+    ];
+    var i=0;
+    function next(){
+      if(i>=trials.length) return done();
+      var t=trials[i++];
+      navigator.mediaCapabilities.decodingInfo({
+        type:'media-source',
+        video:{contentType:t[1],width:t[2],height:t[3],framerate:t[4],bitrate:t[5]}
+      }).then(function(r){
+        put('decoding',t[0],{supported:r.supported,smooth:r.smooth,powerEfficient:r.powerEfficient});
+        next();
+      }).catch(function(){ put('decoding',t[0],'query failed'); next(); });
+    }
+    next();
+  }
+
+  /* ---------- upload ---------- */
+  function shortCode(){
+    return Math.random().toString(36).slice(2,6).toUpperCase();
+  }
+
+  function upload(){
+    progress(95,'uploading');
+    report.code=shortCode();
+    fetch('/api/probe?token='+encodeURIComponent(token),{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(report)
+    }).then(function(r){ return r.json(); }).then(function(){
+      progress(100,'done');
+      el.status.innerHTML='<span class="ok">Report sent.</span>';
+      el.code.textContent=report.code;
+      el.step.innerHTML='Open this on your computer:<br><b>/report?token='+token+'</b>'+
+        '<br><br>The code above should match what you see there.';
     }).catch(function(){
-      line(s[0], false, s[2], s[3]);
-      probeDrm(index+1);
+      el.status.innerHTML='<span class="bad">Upload failed.</span>';
+      el.step.textContent='The tests ran but could not reach the server. Check the connection and restart.';
     });
   }
 
-  /* ---- a real stream, if one is handed in ---- */
-  function testStream(){
-    var src=new URLSearchParams(location.search).get('src');
-    if(!src) return probeDrm(0);
-    group('SUPPLIED STREAM');
-    var t=document.createElement('video');
-    t.playsInline=true; t.muted=true; t.src=src;
-    var done=false;
-    var finishTest=function(state,note){
-      if(done) return; done=true;
-      line('stream', state, 'Loads the stream you passed in', note);
-      probeDrm(0);
-    };
-    t.addEventListener('loadedmetadata',function(){
-      finishTest(true,'Reported '+t.videoWidth+'x'+t.videoHeight+'.');
-    });
-    t.addEventListener('error',function(){
-      var code=t.error?t.error.code:0;
-      finishTest(false,'Error code '+code+(code===4?' — format not supported or blocked.':'.'));
-    });
-    setTimeout(function(){ finishTest(null,'Timed out after 8 seconds.'); },8000);
-    t.load();
+  progress(50,'checking DRM');
+  testDrm(0,function(){
+    progress(75,'checking decode support');
+    testMediaCapabilities(upload);
+  });
+})();
+</script>
+</body>
+</html>`;
+
+const REPORT_PAGE = String.raw`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Probe report</title>
+<style>
+  :root { --ink:#0B0D0C; --panel:#141817; --rail:#262E2C; --cue:#FFB000; --pass:#3DDC84;
+          --fail:#FF4436; --text:#ECEAE4; --muted:#7F8C89; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--ink); color:var(--text); font-family:ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif;
+    padding:32px 20px 80px; }
+  .mono { font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace; letter-spacing:.04em; }
+  .wrap { max-width:900px; margin:0 auto; }
+  header { padding-bottom:18px; border-bottom:2px solid var(--rail); display:flex;
+    justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:12px; }
+  h1 { font-size:22px; letter-spacing:.16em; }
+  .when { font-size:14px; color:var(--muted); }
+  .code { color:var(--cue); font-size:18px; }
+  h2 { font-size:13px; letter-spacing:.18em; color:var(--cue); margin:34px 0 12px;
+    padding-bottom:8px; border-bottom:1px solid var(--rail); }
+  table { width:100%; border-collapse:collapse; }
+  td { padding:9px 0; vertical-align:top; border-bottom:1px solid rgba(38,46,44,.6); font-size:15px; }
+  td.k { width:38%; color:var(--muted); padding-right:16px; word-break:break-word; }
+  td.v { word-break:break-word; }
+  .yes { color:var(--pass); font-weight:600; }
+  .no { color:var(--fail); }
+  .warn { color:var(--cue); }
+  .empty { padding:60px 0; color:var(--muted); font-size:16px; line-height:1.6; }
+  .raw { margin-top:44px; }
+  .raw summary { cursor:pointer; color:var(--muted); font-size:14px; letter-spacing:.1em; }
+  pre { margin-top:14px; padding:16px; background:var(--panel); border-left:4px solid var(--cue);
+    font-family:ui-monospace,Menlo,monospace; font-size:12px; line-height:1.5; overflow-x:auto;
+    white-space:pre-wrap; word-break:break-word; }
+  .verdict { margin-top:28px; padding:18px; background:var(--panel); border-left:5px solid var(--cue);
+    font-size:16px; line-height:1.55; }
+  .verdict b { color:var(--text); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 class="mono">PROBE REPORT</h1>
+    <span id="meta" class="when mono"></span>
+  </header>
+  <div id="out"></div>
+  <div id="verdict" class="verdict" style="display:none"></div>
+  <details class="raw"><summary class="mono">RAW JSON</summary><pre id="raw"></pre></details>
+</div>
+
+<script>
+(function(){
+  'use strict';
+  var params=new URLSearchParams(location.search);
+  var token=(params.get('token')||'probe').trim();
+  var out=document.getElementById('out');
+
+  function esc(v){
+    return String(v==null?'':v).replace(/[&<>"']/g,function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; });
   }
 
-  function finish(){
-    var v=document.getElementById('verdict');
-    v.style.display='block';
-    var text;
-    if(results.widevine===true || results.fairplay===true || results.playready===true){
-      text='<b>A DRM system is present.</b> Protected streams are technically possible here. '+
-           'Whether a given service will issue a licence to this client is a separate question, '+
-           'and one its terms of service usually answer with no.';
-    } else if(results.eme===true && results.clearkey===true){
-      text='<b>EME exists but no real DRM is installed.</b> Clear Key works, which only handles '+
-           'unencrypted test content. No commercial protected stream will play on this device.';
-    } else if(results.eme===true){
-      text='<b>EME exists but every DRM system was refused.</b> No commercial protected stream will play here.';
-    } else {
-      text='<b>No EME at all.</b> This runtime cannot play any protected content, full stop. '+
-           'Unprotected streams may still work — check the codec results above.';
+  function renderValue(v){
+    if(v===true) return '<span class="yes">YES</span>';
+    if(v===false) return '<span class="no">NO</span>';
+    if(v===null||v==='') return '<span class="warn">&mdash;</span>';
+    if(typeof v==='object'){
+      return Object.keys(v).map(function(k){
+        var inner=v[k];
+        var mark = inner===true?'<span class="yes">yes</span>'
+                 : inner===false?'<span class="no">no</span>'
+                 : inner==='no'?'<span class="no">no</span>'
+                 : inner==='probably'?'<span class="yes">probably</span>'
+                 : inner==='maybe'?'<span class="warn">maybe</span>'
+                 : esc(inner);
+        return esc(k)+': '+mark;
+      }).join(' &nbsp;·&nbsp; ');
     }
-    if(results.mse===true && results.mseH264===true){
-      text+='<br><br><b>Adaptive streaming works.</b> Any unprotected HLS or DASH source should play, '+
-            'which is the interesting part regardless of how the DRM lines came out.';
-    } else if(results.hlsNative===true){
-      text+='<br><br><b>Native HLS works</b> even without MSE, so a plain .m3u8 has a good chance.';
-    } else {
-      text+='<br><br><b>No adaptive streaming path found.</b> Only plain progressive files are likely to play.';
-    }
-    v.innerHTML=text;
+    if(v==='refused'||v==='no EME') return '<span class="no">'+esc(v)+'</span>';
+    return esc(v);
   }
 
-  testStream();
+  function section(title,data){
+    var h=document.createElement('h2');
+    h.className='mono'; h.textContent=title;
+    out.appendChild(h);
+    var t=document.createElement('table');
+    t.innerHTML=Object.keys(data).map(function(k){
+      return '<tr><td class="k">'+esc(k)+'</td><td class="v">'+renderValue(data[k])+'</td></tr>';
+    }).join('');
+    out.appendChild(t);
+  }
+
+  function verdictFor(r){
+    var drm=r.sections.drm||{};
+    var f=r.sections.features||{};
+    var parts=[];
+    var wv=drm['Widevine'];
+    if(wv && wv!=='refused' && wv!=='no EME'){
+      parts.push('<b>Widevine is available</b> at: '+esc(wv)+'. Protected streams could technically decrypt here.');
+    } else {
+      parts.push('<b>No Widevine.</b> No commercial subscription service can play on this device, '+
+                 'regardless of which one you subscribe to. This is the decisive line.');
+    }
+    if(f.MediaSource===true){
+      parts.push('<b>MSE works</b>, so any unencrypted HLS or DASH source will play.');
+    }
+    if(f.WebRTC===true){
+      parts.push('<b>WebRTC is present</b> — a sub-second path from a machine on your own network, '+
+                 'if you ever want live low-latency video from something you control.');
+    }
+    if(f.WebCodecs===true){
+      parts.push('<b>WebCodecs is present</b>, which allows frame-level decoding under your own control.');
+    }
+    return parts.join('<br><br>');
+  }
+
+  fetch('/api/probe?token='+encodeURIComponent(token),{cache:'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      var r=data.report;
+      if(!r){
+        out.innerHTML='<div class="empty">Nothing uploaded yet for this token.<br><br>'+
+          'Open <b>/probe?token='+esc(token)+'</b> on the glasses first, wait for the code to appear, then reload this page.</div>';
+        return;
+      }
+      document.getElementById('meta').innerHTML=
+        'CODE <span class="code">'+esc(r.code||'')+'</span> &nbsp;·&nbsp; '+esc(new Date(r.takenAt).toLocaleString());
+      var order=['device','network','features','codecs','drm','decoding'];
+      order.forEach(function(name){
+        if(r.sections[name]) section(name.toUpperCase(),r.sections[name]);
+      });
+      Object.keys(r.sections).forEach(function(name){
+        if(order.indexOf(name)===-1) section(name.toUpperCase(),r.sections[name]);
+      });
+      var v=document.getElementById('verdict');
+      v.style.display='block';
+      v.innerHTML=verdictFor(r);
+      document.getElementById('raw').textContent=JSON.stringify(r,null,2);
+    })
+    .catch(function(){
+      out.innerHTML='<div class="empty">Could not load the report.</div>';
+    });
 })();
 </script>
 </body>
@@ -1224,8 +1434,11 @@ const LIVE_PAGE = String.raw`<!DOCTYPE html>
   body { position:relative; }
   .mono { font-family:"SF Mono","Roboto Mono",Menlo,Consolas,monospace; letter-spacing:.04em; font-variant-numeric:tabular-nums; }
   #sink { position:absolute; top:0; left:0; width:1px; height:1px; opacity:0; border:none; background:none; }
-  .stage { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; overflow:hidden; }
-  video { width:600px; max-height:600px; background:var(--ink); pointer-events:none; }
+  .stage { position:absolute; top:0; left:0; width:600px; height:600px;
+    display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  video { display:block; width:600px; height:auto; max-height:600px;
+    object-fit:contain; background:var(--ink); pointer-events:none; }
+  video.fill { width:1067px; height:600px; max-height:600px; object-fit:cover; }
   .chrome { position:absolute; inset:0; pointer-events:none; opacity:1; transition:opacity 400ms ease; }
   .chrome.hidden { opacity:0; }
   .top { position:absolute; top:0; left:0; right:0; padding:18px 26px 26px;
@@ -1274,6 +1487,7 @@ const LIVE_PAGE = String.raw`<!DOCTYPE html>
   var params=new URLSearchParams(location.search);
   var src=params.get('src');
   var label=params.get('name')||'';
+  var ZOOM=params.get('zoom')==='fill'?'fill':'fit';
 
   var v=document.getElementById('v');
   var el={};
@@ -1281,6 +1495,7 @@ const LIVE_PAGE = String.raw`<!DOCTYPE html>
 
   if(!src) return;
   el.panel.classList.add('gone');
+  if(ZOOM==='fill') v.classList.add('fill');
   el.name.textContent=label||src.replace(/^https?:\/\//,'').slice(0,60);
 
   var chromeTimer=null;
@@ -1511,6 +1726,33 @@ async function addToQueue(token, source, rawQuery) {
   return {status: 201, body: {items: next, added: entry}};
 }
 
+// Stores and returns a device capability report. Reuses the queue storage,
+// keyed separately, so there is nothing new to configure.
+async function handleProbe(req, res, url) {
+  const token = (url.searchParams.get('token') || 'probe').trim();
+  if (!/^[\w-]{1,64}$/.test(token)) {
+    return sendJson(res, 400, {error: 'Bad token.'});
+  }
+  const key = `probe-${token}`;
+  try {
+    if (req.method === 'POST') {
+      const body = await readBody(req);
+      if (!body || typeof body !== 'object') {
+        return sendJson(res, 422, {error: 'Expected a report.'});
+      }
+      await writeQueue(key, [body]);
+      return sendJson(res, 201, {ok: true, code: body.code || null});
+    }
+    if (req.method === 'GET') {
+      const rows = await readQueue(key);
+      return sendJson(res, 200, {report: rows[0] || null});
+    }
+    return sendJson(res, 405, {error: 'Method not allowed.'});
+  } catch (error) {
+    return sendJson(res, 500, {error: 'Storage is unreachable.'});
+  }
+}
+
 async function handleQueue(req, res, url) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -1611,6 +1853,7 @@ const server = http.createServer(async (req, res) => {
   const route = url.pathname.replace(/\/+$/, '') || '/';
 
   if (route === '/api/queue') return handleQueue(req, res, url);
+  if (route === '/api/probe') return handleProbe(req, res, url);
 
   if (route === '/healthz') {
     let reachable = true;
@@ -1630,6 +1873,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (route === '/probe') return sendPage(res, PROBE_PAGE, 'text/html; charset=utf-8');
   if (route === '/live') return sendPage(res, LIVE_PAGE, 'text/html; charset=utf-8');
+  if (route === '/report') return sendPage(res, REPORT_PAGE, 'text/html; charset=utf-8');
   if (route === '/manifest.webmanifest') {
     return sendPage(res, MANIFEST, 'application/manifest+json');
   }
