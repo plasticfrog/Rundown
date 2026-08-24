@@ -292,6 +292,9 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     background:transparent; border:none; border-left:8px solid transparent; color:var(--text); text-align:left; cursor:pointer;
     transition:border-color 120ms ease, background 120ms ease; }
   .row:focus, .row.focused { outline:none; border-left-color:var(--cue); background:rgba(255,176,0,.12); }
+  .row.armed { border-left-color:var(--live); background:rgba(255,68,54,.16); }
+  .row.armed .row-num { color:var(--live); }
+  .row-remove { display:block; font-size:17px; color:var(--live); margin-top:4px; letter-spacing:.1em; }
   .row-num { font-size:22px; color:var(--muted); width:44px; flex-shrink:0; }
   .row:focus .row-num, .row.focused .row-num { color:var(--cue); }
   .row-body { min-width:0; }
@@ -348,7 +351,7 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
 <section id="listScreen" class="screen active">
   <header><span class="slug mono">RUNDOWN</span><span id="count" class="count mono">--</span></header>
   <div id="rows" class="rows"></div>
-  <footer class="mono">SWIPE TO MOVE &nbsp;&middot;&nbsp; PINCH TO PLAY</footer>
+  <footer id="listHint" class="mono">SWIPE TO MOVE &nbsp;&middot;&nbsp; PINCH TO PLAY &nbsp;&middot;&nbsp; RIGHT TO REMOVE</footer>
 </section>
 
 <section id="playerScreen" class="screen">
@@ -401,7 +404,7 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
   var keyCount=0, lastKey='none';
 
   var el={};
-  ['listScreen','playerScreen','rows','count','nowTitle','nowLabel','veil',
+  ['listScreen','playerScreen','rows','count','nowTitle','nowLabel','veil','listHint',
    'trackFill','state','time','rate','chrome','sink','debug']
     .forEach(function(id){ el[id]=document.getElementById(id); });
 
@@ -446,15 +449,26 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     if(focusIndex>windowStart+WINDOW-1) windowStart=focusIndex-WINDOW+1;
     el.rows.innerHTML=items.slice(windowStart,windowStart+WINDOW).map(function(item,i){
       var n=windowStart+i;
-      return '<button class="row focusable" data-index="'+n+'"><span class="row-num mono">'+String(n+1).padStart(2,'0')+
-        '</span><span class="row-body"><span class="row-title">'+esc(item.title)+'</span>'+
-        (item.channel?'<span class="row-channel">'+esc(item.channel)+'</span>':'')+'</span></button>';
+      var armed=item.id===armedId;
+      var sub='';
+      if(armed){
+        sub='<span class="row-remove">PINCH TO REMOVE &middot; LEFT TO KEEP</span>';
+      } else {
+        var bits=[];
+        if(item.channel) bits.push(esc(item.channel));
+        if(item.position>10) bits.push('resume '+clockFace(item.position));
+        if(bits.length) sub='<span class="row-channel">'+bits.join(' &middot; ')+'</span>';
+      }
+      return '<button class="row focusable'+(armed?' armed':'')+'" data-index="'+n+'">'+
+        '<span class="row-num mono">'+String(n+1).padStart(2,'0')+'</span>'+
+        '<span class="row-body"><span class="row-title">'+esc(item.title)+'</span>'+sub+'</span></button>';
     }).join('');
     Array.prototype.forEach.call(el.rows.querySelectorAll('.row'),function(node){
       node.addEventListener('click',function(){ openPlayer(Number(this.getAttribute('data-index'))); });
     });
     var target=el.rows.querySelector('[data-index="'+focusIndex+'"]');
     if(target){ target.classList.add('focused'); target.focus(); }
+    setHint();
     paintDebug();
   }
   function loadQueue(){
@@ -473,7 +487,41 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
   }
   function dropItem(id){
     items=items.filter(function(it){return it.id!==id;});
+    try{ localStorage.removeItem('rundown.pos.'+id); }catch(e){}
     fetch('/api/queue?token='+encodeURIComponent(token)+'&id='+encodeURIComponent(id),{method:'DELETE'}).catch(function(){});
+  }
+
+  /* ---------- removing from the list ----------
+     Right swipe arms the cued row, then a pinch removes it. Two deliberate
+     actions, so a stray gesture never deletes anything. */
+  var armedId=null, armTimer=null;
+
+  function setHint(){
+    if(!el.listHint) return;
+    el.listHint.innerHTML = armedId
+      ? 'PINCH TO REMOVE &nbsp;&middot;&nbsp; LEFT OR UP TO KEEP'
+      : 'SWIPE TO MOVE &nbsp;&middot;&nbsp; PINCH TO PLAY &nbsp;&middot;&nbsp; RIGHT TO REMOVE';
+  }
+  function disarm(){
+    if(armTimer){ clearTimeout(armTimer); armTimer=null; }
+    if(!armedId) return;
+    armedId=null; renderList();
+  }
+  function arm(){
+    if(!items.length||!items[focusIndex]) return;
+    armedId=items[focusIndex].id;
+    renderList();
+    if(armTimer) clearTimeout(armTimer);
+    armTimer=setTimeout(disarm,5000);   // forget about it and it stands down
+  }
+  function removeArmed(){
+    if(!armedId) return;
+    var id=armedId;
+    armedId=null;
+    if(armTimer){ clearTimeout(armTimer); armTimer=null; }
+    dropItem(id);
+    if(focusIndex>items.length-1) focusIndex=Math.max(0,items.length-1);
+    renderList();
   }
 
   /* ---------- focus lock ----------
@@ -743,9 +791,14 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     var handled=true;
     if(view==='list'){
       switch(e.key){
-        case 'ArrowUp': case 'ArrowLeft': moveFocus(-1); break;
-        case 'ArrowDown': case 'ArrowRight': moveFocus(1); break;
-        case 'Enter': if(items.length) openPlayer(focusIndex); break;
+        case 'ArrowUp': disarm(); moveFocus(-1); break;
+        case 'ArrowDown': disarm(); moveFocus(1); break;
+        case 'ArrowRight': arm(); break;
+        case 'ArrowLeft': disarm(); break;
+        case 'Enter':
+          if(armedId) removeArmed();
+          else if(items.length) openPlayer(focusIndex);
+          break;
         default: handled=false;
       }
     } else {
