@@ -1022,6 +1022,193 @@ const PHONE_PAGE = String.raw`<!DOCTYPE html>
 </body>
 </html>`;
 
+const PROBE_PAGE = String.raw`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=600, height=600, initial-scale=1.0, user-scalable=no">
+<meta name="mrbd-web-app-capable" content="yes">
+<title>Rundown Probe</title>
+<style>
+  :root { --ink:#000; --cue:#FFB000; --pass:#3DDC84; --fail:#FF4436; --text:#FFF; --muted:#8E9A97; --rail:#2A312F; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:600px; min-height:600px; background:var(--ink); color:var(--text);
+    font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; }
+  body { padding:0 0 40px; }
+  .mono { font-family:"SF Mono","Roboto Mono",Menlo,Consolas,monospace; letter-spacing:.04em; }
+  header { padding:22px 24px 14px; border-bottom:2px solid var(--rail); }
+  h1 { font-size:24px; letter-spacing:.14em; font-weight:700; }
+  .sub { font-size:15px; color:var(--muted); margin-top:6px; }
+  .group { padding:16px 24px 6px; font-size:14px; letter-spacing:.16em; color:var(--cue); }
+  .line { display:flex; align-items:flex-start; gap:12px; padding:9px 24px; font-size:17px; line-height:1.35; }
+  .mark { width:60px; flex-shrink:0; font-weight:700; }
+  .yes { color:var(--pass); }
+  .no { color:var(--fail); }
+  .maybe { color:var(--cue); }
+  .what { flex:1; min-width:0; }
+  .note { display:block; font-size:14px; color:var(--muted); margin-top:2px; word-break:break-word; }
+  .verdict { margin:22px 24px 0; padding:16px; border-left:5px solid var(--cue); background:rgba(255,176,0,.1);
+    font-size:17px; line-height:1.45; }
+  video { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1 class="mono">MEDIA PROBE</h1>
+  <div class="sub">What this runtime can actually play.</div>
+</header>
+<div id="out"></div>
+<div id="verdict" class="verdict" style="display:none"></div>
+<video id="v" playsinline muted></video>
+
+<script>
+(function(){
+  'use strict';
+  var out=document.getElementById('out');
+  var results={};
+
+  function group(name){
+    var d=document.createElement('div');
+    d.className='group mono'; d.textContent=name; out.appendChild(d);
+  }
+  function line(key,state,label,note){
+    results[key]=state;
+    var d=document.createElement('div');
+    d.className='line';
+    var cls = state===true?'yes':state===false?'no':'maybe';
+    var mark = state===true?'YES':state===false?'NO':'~';
+    d.innerHTML='<span class="mark mono '+cls+'">'+mark+'</span><span class="what">'+label+
+      (note?'<span class="note">'+note+'</span>':'')+'</span>';
+    out.appendChild(d);
+  }
+
+  var video=document.getElementById('v');
+  function canPlay(type){
+    var r=video.canPlayType(type);
+    return r==='probably' ? true : r==='maybe' ? null : false;
+  }
+  function mseType(type){
+    return (window.MediaSource && MediaSource.isTypeSupported) ? MediaSource.isTypeSupported(type) : false;
+  }
+
+  /* ---- basics ---- */
+  group('FOUNDATIONS');
+  line('mse', !!window.MediaSource, 'Media Source Extensions',
+    'Needed for any adaptive stream: HLS, DASH, live video.');
+  line('eme', !!(navigator.requestMediaKeySystemAccess), 'Encrypted Media Extensions',
+    'The browser hook DRM plugs into. Without it, no protected stream can play at all.');
+  line('hlsNative', canPlay('application/vnd.apple.mpegurl'), 'Native HLS playback',
+    'Lets a plain .m3u8 go straight into a video tag.');
+  line('fetch', !!window.fetch, 'Fetch', 'For pulling manifests and segments.');
+
+  /* ---- codecs ---- */
+  group('CODECS');
+  line('h264', canPlay('video/mp4; codecs="avc1.42E01E"'), 'H.264 baseline');
+  line('h264high', canPlay('video/mp4; codecs="avc1.640028"'), 'H.264 high profile', 'What most live sports use.');
+  line('hevc', canPlay('video/mp4; codecs="hvc1.1.6.L93.B0"'), 'HEVC / H.265');
+  line('vp9', canPlay('video/webm; codecs="vp9"'), 'VP9');
+  line('av1', canPlay('video/mp4; codecs="av01.0.05M.08"'), 'AV1');
+  line('aac', canPlay('audio/mp4; codecs="mp4a.40.2"'), 'AAC audio');
+  line('mseH264', mseType('video/mp4; codecs="avc1.640028"'), 'H.264 through MSE',
+    'Adaptive streaming needs this specifically, not just the video tag.');
+
+  /* ---- DRM, the actual question ---- */
+  group('DRM SYSTEMS');
+
+  var config=[{
+    initDataTypes:['cenc'],
+    videoCapabilities:[{contentType:'video/mp4; codecs="avc1.42E01E"'}],
+    audioCapabilities:[{contentType:'audio/mp4; codecs="mp4a.40.2"'}]
+  }];
+
+  var systems=[
+    ['widevine','com.widevine.alpha','Widevine','Google. What MLB.TV, Netflix and most services use on Android and Chrome.'],
+    ['fairplay','com.apple.fps','FairPlay','Apple. Safari and iOS only.'],
+    ['fairplay1','com.apple.fps.1_0','FairPlay 1.0',''],
+    ['playready','com.microsoft.playready','PlayReady','Microsoft. Windows and smart TVs.'],
+    ['clearkey','org.w3.clearkey','Clear Key','Unencrypted test system. Presence proves EME works even if no real DRM is installed.']
+  ];
+
+  function probeDrm(index){
+    if(index>=systems.length){ return finish(); }
+    var s=systems[index];
+    if(!navigator.requestMediaKeySystemAccess){
+      line(s[0], false, s[2], s[3]);
+      return probeDrm(index+1);
+    }
+    navigator.requestMediaKeySystemAccess(s[1], config).then(function(access){
+      var level='';
+      try{
+        var c=access.getConfiguration();
+        var robust=(c.videoCapabilities&&c.videoCapabilities[0]&&c.videoCapabilities[0].robustness)||'';
+        level=robust?(' Robustness: '+robust+'.'):'';
+      }catch(e){}
+      line(s[0], true, s[2], s[3]+level);
+      probeDrm(index+1);
+    }).catch(function(){
+      line(s[0], false, s[2], s[3]);
+      probeDrm(index+1);
+    });
+  }
+
+  /* ---- a real stream, if one is handed in ---- */
+  function testStream(){
+    var src=new URLSearchParams(location.search).get('src');
+    if(!src) return probeDrm(0);
+    group('SUPPLIED STREAM');
+    var t=document.createElement('video');
+    t.playsInline=true; t.muted=true; t.src=src;
+    var done=false;
+    var finishTest=function(state,note){
+      if(done) return; done=true;
+      line('stream', state, 'Loads the stream you passed in', note);
+      probeDrm(0);
+    };
+    t.addEventListener('loadedmetadata',function(){
+      finishTest(true,'Reported '+t.videoWidth+'x'+t.videoHeight+'.');
+    });
+    t.addEventListener('error',function(){
+      var code=t.error?t.error.code:0;
+      finishTest(false,'Error code '+code+(code===4?' — format not supported or blocked.':'.'));
+    });
+    setTimeout(function(){ finishTest(null,'Timed out after 8 seconds.'); },8000);
+    t.load();
+  }
+
+  function finish(){
+    var v=document.getElementById('verdict');
+    v.style.display='block';
+    var text;
+    if(results.widevine===true || results.fairplay===true || results.playready===true){
+      text='<b>A DRM system is present.</b> Protected streams are technically possible here. '+
+           'Whether a given service will issue a licence to this client is a separate question, '+
+           'and one its terms of service usually answer with no.';
+    } else if(results.eme===true && results.clearkey===true){
+      text='<b>EME exists but no real DRM is installed.</b> Clear Key works, which only handles '+
+           'unencrypted test content. No commercial protected stream will play on this device.';
+    } else if(results.eme===true){
+      text='<b>EME exists but every DRM system was refused.</b> No commercial protected stream will play here.';
+    } else {
+      text='<b>No EME at all.</b> This runtime cannot play any protected content, full stop. '+
+           'Unprotected streams may still work — check the codec results above.';
+    }
+    if(results.mse===true && results.mseH264===true){
+      text+='<br><br><b>Adaptive streaming works.</b> Any unprotected HLS or DASH source should play, '+
+            'which is the interesting part regardless of how the DRM lines came out.';
+    } else if(results.hlsNative===true){
+      text+='<br><br><b>Native HLS works</b> even without MSE, so a plain .m3u8 has a good chance.';
+    } else {
+      text+='<br><br><b>No adaptive streaming path found.</b> Only plain progressive files are likely to play.';
+    }
+    v.innerHTML=text;
+  }
+
+  testStream();
+})();
+</script>
+</body>
+</html>`;
+
 const MANIFEST = JSON.stringify({
   name: 'Rundown',
   short_name: 'Rundown',
@@ -1237,6 +1424,7 @@ const server = http.createServer(async (req, res) => {
   if (route === '/phone' || route === '/phone.html') {
     return sendPage(res, PHONE_PAGE, 'text/html; charset=utf-8');
   }
+  if (route === '/probe') return sendPage(res, PROBE_PAGE, 'text/html; charset=utf-8');
   if (route === '/manifest.webmanifest') {
     return sendPage(res, MANIFEST, 'application/manifest+json');
   }
