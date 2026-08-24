@@ -1209,6 +1209,171 @@ const PROBE_PAGE = String.raw`<!DOCTYPE html>
 </body>
 </html>`;
 
+const LIVE_PAGE = String.raw`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=600, height=600, initial-scale=1.0, user-scalable=no">
+<meta name="mrbd-web-app-capable" content="yes">
+<title>Live</title>
+<style>
+  :root { --ink:#000; --cue:#FFB000; --live:#FF4436; --text:#FFF; --muted:#8E9A97; --rail:#2A312F; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:600px; height:600px; overflow:hidden; background:var(--ink); color:var(--text);
+    font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; }
+  .mono { font-family:"SF Mono","Roboto Mono",Menlo,Consolas,monospace; letter-spacing:.04em; font-variant-numeric:tabular-nums; }
+  #sink { position:absolute; top:0; left:0; width:1px; height:1px; opacity:0; border:none; background:none; }
+  .stage { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  video { width:600px; max-height:600px; background:var(--ink); pointer-events:none; }
+  .chrome { position:absolute; inset:0; pointer-events:none; opacity:1; transition:opacity 400ms ease; }
+  .chrome.hidden { opacity:0; }
+  .top { position:absolute; top:0; left:0; right:0; padding:18px 26px 26px;
+    background:linear-gradient(to bottom,rgba(0,0,0,.85),rgba(0,0,0,0)); }
+  .bottom { position:absolute; bottom:0; left:0; right:0; padding:26px 26px 18px;
+    background:linear-gradient(to top,rgba(0,0,0,.85),rgba(0,0,0,0)); }
+  .tag { font-size:15px; letter-spacing:.18em; color:var(--live); }
+  .name { font-size:22px; font-weight:600; margin-top:6px; text-shadow:0 2px 8px rgba(0,0,0,.9);
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .readout { display:flex; justify-content:space-between; font-size:18px; text-shadow:0 2px 8px rgba(0,0,0,.9); }
+  .state { color:var(--live); letter-spacing:.12em; }
+  .state.paused { color:var(--muted); }
+  .quality { color:var(--cue); }
+  .panel { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:center;
+    padding:0 40px; gap:14px; background:var(--ink); }
+  .panel.gone { display:none; }
+  .panel h1 { font-size:26px; letter-spacing:.12em; }
+  .panel p { font-size:19px; line-height:1.45; color:var(--muted); }
+  .panel code { color:var(--cue); font-family:"SF Mono",Menlo,monospace; font-size:17px; word-break:break-all; }
+</style>
+</head>
+<body>
+<button id="sink" aria-label="Player"></button>
+<div class="stage"><video id="v" playsinline></video></div>
+<div id="chrome" class="chrome">
+  <div class="top"><div id="tag" class="tag mono">LIVE</div><div id="name" class="name">&nbsp;</div></div>
+  <div class="bottom"><div class="readout mono">
+    <span id="state" class="state">CONNECTING</span><span id="quality" class="quality">&nbsp;</span>
+  </div></div>
+</div>
+<div id="panel" class="panel">
+  <h1 class="mono">LIVE</h1>
+  <p>Add a stream to the address, like<br><code>/live?src=http://192.168.1.20:5004/auto/v5.1</code></p>
+  <p>Any unencrypted HLS, DASH or progressive source works. Protected services do not.</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js"></script>
+<script>
+(function(){
+  'use strict';
+  var params=new URLSearchParams(location.search);
+  var src=params.get('src');
+  var label=params.get('name')||'';
+
+  var v=document.getElementById('v');
+  var el={};
+  ['sink','chrome','tag','name','state','quality','panel'].forEach(function(id){ el[id]=document.getElementById(id); });
+
+  if(!src) return;
+  el.panel.classList.add('gone');
+  el.name.textContent=label||src.replace(/^https?:\/\//,'').slice(0,60);
+
+  var chromeTimer=null;
+  function showChrome(){
+    el.chrome.classList.remove('hidden');
+    if(chromeTimer) clearTimeout(chromeTimer);
+    chromeTimer=setTimeout(function(){ el.chrome.classList.add('hidden'); },2500);
+  }
+  function setState(text,live){ el.state.textContent=text; el.state.className='state'+(live?'':' paused'); }
+
+  // Focus stays here so pinches reach this page, not the video element.
+  function holdFocus(){
+    if(document.activeElement!==el.sink){
+      try{ el.sink.focus({preventScroll:true}); }catch(e){ try{ el.sink.focus(); }catch(e2){} }
+    }
+  }
+  setInterval(holdFocus,1500);
+  window.addEventListener('blur',function(){ setTimeout(holdFocus,50); });
+  document.addEventListener('focusout',function(){ setTimeout(holdFocus,50); });
+  holdFocus();
+
+  var hls=null;
+  var isHls=/\.m3u8(\?|$)/i.test(src);
+
+  function attach(){
+    if(isHls && window.Hls && Hls.isSupported()){
+      // hls.js drives MSE directly, which the probe confirmed works here.
+      hls=new Hls({lowLatencyMode:true, backBufferLength:30, maxBufferLength:20});
+      hls.loadSource(src);
+      hls.attachMedia(v);
+      hls.on(Hls.Events.MANIFEST_PARSED,function(){ v.play().catch(function(){}); });
+      hls.on(Hls.Events.LEVEL_SWITCHED,function(e,d){
+        var lvl=hls.levels[d.level];
+        if(lvl) el.quality.textContent=lvl.height+'p';
+      });
+      hls.on(Hls.Events.ERROR,function(e,data){
+        if(!data.fatal) return;
+        if(data.type===Hls.ErrorTypes.NETWORK_ERROR){ setState('RECONNECTING',false); hls.startLoad(); }
+        else if(data.type===Hls.ErrorTypes.MEDIA_ERROR){ setState('RECOVERING',false); hls.recoverMediaError(); }
+        else { setState('FAILED',false); el.name.textContent='Cannot play this stream.'; }
+      });
+    } else {
+      // Native path: progressive files, or HLS where the runtime handles it.
+      v.src=src;
+      v.play().catch(function(){ setState('TAP TO START',false); });
+    }
+  }
+
+  v.addEventListener('playing',function(){
+    setState('LIVE',true);
+    if(!el.quality.textContent.trim() && v.videoHeight) el.quality.textContent=v.videoHeight+'p';
+    showChrome();
+  });
+  v.addEventListener('waiting',function(){ setState('BUFFERING',false); });
+  v.addEventListener('pause',function(){ setState('PAUSED',false); });
+  v.addEventListener('error',function(){
+    var code=v.error?v.error.code:0;
+    setState('FAILED',false);
+    el.name.textContent='Error '+code+(code===4?' — format refused or blocked.':'.');
+    showChrome();
+  });
+
+  function jumpToLive(){
+    try{
+      if(hls && hls.liveSyncPosition){ v.currentTime=hls.liveSyncPosition; }
+      else if(v.seekable && v.seekable.length){ v.currentTime=v.seekable.end(v.seekable.length-1); }
+      el.tag.textContent='JUMPED TO LIVE';
+      setTimeout(function(){ el.tag.textContent='LIVE'; },1500);
+    }catch(e){}
+  }
+  function nudgeVolume(d){
+    v.volume=Math.max(0,Math.min(1,v.volume+d));
+    el.tag.textContent='VOLUME '+Math.round(v.volume*100);
+    setTimeout(function(){ el.tag.textContent='LIVE'; },1200);
+  }
+
+  window.addEventListener('keydown',function(e){
+    var handled=true;
+    showChrome();
+    switch(e.key){
+      case 'Enter': if(v.paused) v.play().catch(function(){}); else v.pause(); break;
+      case 'ArrowLeft': try{ v.currentTime=Math.max(0,v.currentTime-15); }catch(err){} break;
+      case 'ArrowRight': jumpToLive(); break;
+      case 'ArrowUp': nudgeVolume(0.1); break;
+      case 'ArrowDown': nudgeVolume(-0.1); break;
+      default: handled=false;
+    }
+    holdFocus();
+    if(handled){ e.preventDefault(); e.stopPropagation(); }
+  },true);
+
+  setState('CONNECTING',false);
+  attach();
+  showChrome();
+})();
+</script>
+</body>
+</html>`;
+
 const MANIFEST = JSON.stringify({
   name: 'Rundown',
   short_name: 'Rundown',
@@ -1425,6 +1590,7 @@ const server = http.createServer(async (req, res) => {
     return sendPage(res, PHONE_PAGE, 'text/html; charset=utf-8');
   }
   if (route === '/probe') return sendPage(res, PROBE_PAGE, 'text/html; charset=utf-8');
+  if (route === '/live') return sendPage(res, LIVE_PAGE, 'text/html; charset=utf-8');
   if (route === '/manifest.webmanifest') {
     return sendPage(res, MANIFEST, 'application/manifest+json');
   }
