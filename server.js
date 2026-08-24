@@ -1221,6 +1221,7 @@ const LIVE_PAGE = String.raw`<!DOCTYPE html>
   * { margin:0; padding:0; box-sizing:border-box; }
   html,body { width:600px; height:600px; overflow:hidden; background:var(--ink); color:var(--text);
     font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; }
+  body { position:relative; }
   .mono { font-family:"SF Mono","Roboto Mono",Menlo,Consolas,monospace; letter-spacing:.04em; font-variant-numeric:tabular-nums; }
   #sink { position:absolute; top:0; left:0; width:1px; height:1px; opacity:0; border:none; background:none; }
   .stage { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; overflow:hidden; }
@@ -1244,17 +1245,22 @@ const LIVE_PAGE = String.raw`<!DOCTYPE html>
   .panel h1 { font-size:26px; letter-spacing:.12em; }
   .panel p { font-size:19px; line-height:1.45; color:var(--muted); }
   .panel code { color:var(--cue); font-family:"SF Mono",Menlo,monospace; font-size:17px; word-break:break-all; }
+  .pinned { position:absolute; left:0; right:0; bottom:0; padding:16px 26px; background:rgba(0,0,0,.9);
+    border-top:3px solid var(--cue); font-size:18px; line-height:1.4; color:var(--cue); }
+  .pinned.gone { display:none; }
+  .pinned .why { display:block; font-size:15px; color:var(--muted); margin-top:4px; }
 </style>
 </head>
 <body>
 <button id="sink" aria-label="Player"></button>
-<div class="stage"><video id="v" playsinline></video></div>
+<div class="stage"><video id="v" playsinline muted autoplay></video></div>
 <div id="chrome" class="chrome">
   <div class="top"><div id="tag" class="tag mono">LIVE</div><div id="name" class="name">&nbsp;</div></div>
   <div class="bottom"><div class="readout mono">
     <span id="state" class="state">CONNECTING</span><span id="quality" class="quality">&nbsp;</span>
   </div></div>
 </div>
+<div id="pinned" class="pinned gone"></div>
 <div id="panel" class="panel">
   <h1 class="mono">LIVE</h1>
   <p>Add a stream to the address, like<br><code>/live?src=http://192.168.1.20:5004/auto/v5.1</code></p>
@@ -1271,7 +1277,7 @@ const LIVE_PAGE = String.raw`<!DOCTYPE html>
 
   var v=document.getElementById('v');
   var el={};
-  ['sink','chrome','tag','name','state','quality','panel'].forEach(function(id){ el[id]=document.getElementById(id); });
+  ['sink','chrome','tag','name','state','quality','panel','pinned'].forEach(function(id){ el[id]=document.getElementById(id); });
 
   if(!src) return;
   el.panel.classList.add('gone');
@@ -1281,8 +1287,17 @@ const LIVE_PAGE = String.raw`<!DOCTYPE html>
   function showChrome(){
     el.chrome.classList.remove('hidden');
     if(chromeTimer) clearTimeout(chromeTimer);
-    chromeTimer=setTimeout(function(){ el.chrome.classList.add('hidden'); },2500);
+    // Only fade the overlay once video is genuinely running. Otherwise an
+    // error message would vanish before it could be read.
+    chromeTimer=setTimeout(function(){
+      if(!v.paused && v.readyState>2) el.chrome.classList.add('hidden');
+    },2500);
   }
+  function pin(message,why){
+    el.pinned.classList.remove('gone');
+    el.pinned.innerHTML=message+(why?'<span class="why">'+why+'</span>':'');
+  }
+  function unpin(){ el.pinned.classList.add('gone'); }
   function setState(text,live){ el.state.textContent=text; el.state.className='state'+(live?'':' paused'); }
 
   // Focus stays here so pinches reach this page, not the video element.
@@ -1300,6 +1315,12 @@ const LIVE_PAGE = String.raw`<!DOCTYPE html>
   var isHls=/\.m3u8(\?|$)/i.test(src);
 
   function attach(){
+    if(isHls && !window.Hls){
+      pin('Player script did not load.',
+          'hls.js is blocked or unreachable from this device, so .m3u8 cannot be demuxed here.');
+      setState('NO PLAYER',false);
+      return;
+    }
     if(isHls && window.Hls && Hls.isSupported()){
       // hls.js drives MSE directly, which the probe confirmed works here.
       hls=new Hls({lowLatencyMode:true, backBufferLength:30, maxBufferLength:20});
@@ -1326,14 +1347,19 @@ const LIVE_PAGE = String.raw`<!DOCTYPE html>
   v.addEventListener('playing',function(){
     setState('LIVE',true);
     if(!el.quality.textContent.trim() && v.videoHeight) el.quality.textContent=v.videoHeight+'p';
+    // Autoplay is only permitted while muted, so sound waits for a gesture.
+    if(v.muted) pin('Playing, muted.','Pinch once for sound.'); else unpin();
     showChrome();
   });
   v.addEventListener('waiting',function(){ setState('BUFFERING',false); });
   v.addEventListener('pause',function(){ setState('PAUSED',false); });
   v.addEventListener('error',function(){
     var code=v.error?v.error.code:0;
+    var why={1:'Loading was aborted.',2:'Network failed.',
+             3:'Decode failed — codec present but the stream would not decode.',
+             4:'Source refused. Wrong format, blocked by CORS, or unreachable.'}[code]||'Unknown failure.';
     setState('FAILED',false);
-    el.name.textContent='Error '+code+(code===4?' — format refused or blocked.':'.');
+    pin('Cannot play this stream. Error '+code+'.',why);
     showChrome();
   });
 
@@ -1355,7 +1381,11 @@ const LIVE_PAGE = String.raw`<!DOCTYPE html>
     var handled=true;
     showChrome();
     switch(e.key){
-      case 'Enter': if(v.paused) v.play().catch(function(){}); else v.pause(); break;
+      case 'Enter':
+        if(v.muted){ v.muted=false; v.volume=0.8; unpin(); v.play().catch(function(){}); }
+        else if(v.paused) v.play().catch(function(){});
+        else v.pause();
+        break;
       case 'ArrowLeft': try{ v.currentTime=Math.max(0,v.currentTime-15); }catch(err){} break;
       case 'ArrowRight': jumpToLive(); break;
       case 'ArrowUp': nudgeVolume(0.1); break;
@@ -1367,8 +1397,17 @@ const LIVE_PAGE = String.raw`<!DOCTYPE html>
   },true);
 
   setState('CONNECTING',false);
+  pin('Connecting to the stream...','');
   attach();
   showChrome();
+  // If nothing has started after ten seconds, say so rather than sit black.
+  setTimeout(function(){
+    if(v.readyState<2 && el.state.textContent!=='FAILED' && el.state.textContent!=='NO PLAYER'){
+      pin('No video after 10 seconds.',
+          'The stream may be unreachable from this device, or blocked by CORS.');
+      showChrome();
+    }
+  },10000);
 })();
 </script>
 </body>
