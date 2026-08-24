@@ -384,14 +384,19 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
 (function () {
   'use strict';
   var POLL_MS = 8000, WINDOW = 5, SEEK_STEP = 10, CHROME_MS = 2500, BLACKOUT_CHROME_MS = 1500;
-  var DOUBLE_PINCH_MS = 400;
+  // A physical double pinch is slower than a mouse double click. Tune with ?dp=900
+  var DOUBLE_PINCH_MS = (function(){
+    var m = location.search.match(/[?&]dp=(\d+)/);
+    var v = m ? parseInt(m[1], 10) : 0;
+    return (v >= 200 && v <= 2000) ? v : 700;
+  })();
 
   // Audio only: the player keeps running, we just stop painting it. Remembered
   // across videos and sessions, since it is a mode rather than a one-off.
   var audioOnly = (function(){
     try{ return localStorage.getItem('rundown.audioOnly')==='1'; }catch(e){ return false; }
   })();
-  var lastPinchAt = 0;
+  var lastPinchAt = 0, lastPlayAction = null, lastGap = 0;
 
   var params = new URLSearchParams(location.search);
   var DEBUG = params.get('debug') === '1';
@@ -435,6 +440,8 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
       : active ? active.tagName.toLowerCase() : 'none';
     el.debug.innerHTML =
       'view ' + view + '<br>keys ' + keyCount + '<br>last ' + lastKey +
+      '<br>gap ' + lastGap + 'ms / ' + DOUBLE_PINCH_MS +
+      '<br>audio ' + (audioOnly ? 'ON' : 'off') +
       '<br>focus ' + where + (note ? '<br>' + note : '');
   }
 
@@ -514,9 +521,10 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
 
   function setHint(){
     if(!el.listHint) return;
+    var mode = audioOnly ? ' &nbsp;&middot;&nbsp; <span style="color:#FFB000">AUDIO ONLY</span>' : '';
     el.listHint.innerHTML = armedId
       ? 'PINCH TO REMOVE &nbsp;&middot;&nbsp; LEFT OR UP TO KEEP'
-      : 'SWIPE TO MOVE &nbsp;&middot;&nbsp; PINCH TO PLAY &nbsp;&middot;&nbsp; RIGHT TO REMOVE';
+      : 'PINCH TO PLAY &nbsp;&middot;&nbsp; RIGHT REMOVES &nbsp;&middot;&nbsp; LEFT AUDIO' + mode;
   }
   function disarm(){
     if(armTimer){ clearTimeout(armTimer); armTimer=null; }
@@ -582,6 +590,7 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
   function toggleAudioOnly(){
     audioOnly=!audioOnly;
     try{ localStorage.setItem('rundown.audioOnly', audioOnly?'1':'0'); }catch(e){}
+    if(view==='list'){ setHint(); paintDebug(); return; }
     applyAudioOnly();
     // Confirm the change, then get out of the way.
     el.chrome.classList.remove('hidden');
@@ -826,8 +835,21 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     return saved>10 ? saved : (item.start||0);
   }
   function togglePlay(){
-    if(!player||!playerReady) return;
-    try{ var s=player.getPlayerState(); if(s===YT.PlayerState.PLAYING) player.pauseVideo(); else player.playVideo(); }catch(e){}
+    if(!player||!playerReady) return null;
+    try{
+      var s=player.getPlayerState();
+      if(s===YT.PlayerState.PLAYING){ player.pauseVideo(); return 'paused'; }
+      player.playVideo(); return 'played';
+    }catch(e){ return null; }
+  }
+  // Reversing by state would re-read a value YouTube has not updated yet, so
+  // we undo by remembering what we actually did.
+  function undoPlayToggle(action){
+    if(!player||!playerReady||!action) return;
+    try{
+      if(action==='paused') player.playVideo();
+      else player.pauseVideo();
+    }catch(e){}
   }
 
   // Capture phase, on window, so we see the event before anything else can.
@@ -839,7 +861,11 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
         case 'ArrowUp': disarm(); moveFocus(-1); break;
         case 'ArrowDown': disarm(); moveFocus(1); break;
         case 'ArrowRight': arm(); break;
-        case 'ArrowLeft': disarm(); break;
+        case 'ArrowLeft':
+          // Left cancels a pending removal, or otherwise toggles audio only.
+          if(armedId) disarm();
+          else toggleAudioOnly();
+          break;
         case 'Enter':
           if(armedId) removeArmed();
           else if(items.length) openPlayer(focusIndex);
@@ -853,13 +879,16 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
           // Single pinch acts immediately so play/pause never feels laggy. A
           // second pinch inside the window undoes it and toggles blackout.
           var now=Date.now();
-          if(now-lastPinchAt < DOUBLE_PINCH_MS){
+          var gap=now-lastPinchAt;
+          lastGap=lastPinchAt?gap:0;
+          if(lastPinchAt && gap<DOUBLE_PINCH_MS){
             lastPinchAt=0;
-            togglePlay();        // revert the toggle the first pinch caused
+            undoPlayToggle(lastPlayAction);
+            lastPlayAction=null;
             toggleAudioOnly();
           } else {
             lastPinchAt=now;
-            togglePlay();
+            lastPlayAction=togglePlay();
           }
           break;
         case 'ArrowLeft': scrub(-1); break;
