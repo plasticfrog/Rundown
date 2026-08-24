@@ -552,11 +552,13 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     stopTicker();
     ticker=setInterval(function(){
       if(!player||!playerReady||view!=='player') return;
+      if(pendingSeek!==null) return;   // a scrub preview owns the readout
       try{
         var now=player.getCurrentTime()||0, total=player.getDuration()||0;
         el.time.textContent=clockFace(now)+' / '+clockFace(total);
         el.trackFill.style.width=total?(now/total)*100+'%':'0%';
       }catch(e){}
+      saveProgress(false);
     },500);
   }
   function stopTicker(){ if(ticker){ clearInterval(ticker); ticker=null; } }
@@ -574,11 +576,19 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     el.listScreen.classList.remove('active'); el.playerScreen.classList.add('active');
     el.nowTitle.textContent=item.title; el.veil.classList.remove('show');
     setState('CUEING',false); el.trackFill.style.width='0%'; el.time.textContent='0:00 / 0:00';
+    var resumeAt=resumePointFor(item);
     history.pushState({screen:'player',id:item.id},'');
-    if(playerReady&&player) player.loadVideoById({videoId:item.videoId,startSeconds:item.start||0});
+    if(playerReady&&player) player.loadVideoById({videoId:item.videoId,startSeconds:resumeAt});
     sizeStage(); startTicker(); showChrome(); startFocusGuard(); paintDebug();
+    if(resumeAt>10){
+      el.nowLabel.textContent='RESUMED '+clockFace(resumeAt);
+      setTimeout(function(){ el.nowLabel.textContent='ON AIR'; },2000);
+    }
   }
   function closePlayer(){
+    if(seekCommit){ clearTimeout(seekCommit); seekCommit=null; }
+    if(pendingSeek!==null){ try{ player.seekTo(pendingSeek,true); }catch(e){} pendingSeek=null; }
+    saveProgress(true);
     view='list'; stopTicker(); stopFocusGuard();
     if(player&&playerReady){ try{player.stopVideo();}catch(e){} }
     el.playerScreen.classList.remove('active'); el.listScreen.classList.add('active');
@@ -647,6 +657,81 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
     if(!player||!playerReady) return;
     try{ player.seekTo(Math.max(0,(player.getCurrentTime()||0)+delta),true); }catch(e){}
   }
+
+  /* ---------- scrubbing ----------
+     Keep swiping the same way and the step grows: 10s, then 30s, a minute,
+     five, ten. Nothing is sent to the player until you stop for a moment, so
+     crossing twenty minutes costs one seek instead of a hundred. */
+  var SEEK_STEPS=[10,10,30,30,60,60,300,300,600];
+  var pendingSeek=null, seekCommit=null, seekStreak=-1, lastSeekAt=0;
+
+  function scrub(direction){
+    if(!player||!playerReady) return;
+    var now=Date.now();
+    seekStreak = (now-lastSeekAt < 1200) ? seekStreak+1 : 0;
+    lastSeekAt=now;
+
+    var step=SEEK_STEPS[Math.min(seekStreak,SEEK_STEPS.length-1)];
+    var total=0, base=0;
+    try{ total=player.getDuration()||0; base=(pendingSeek===null)?(player.getCurrentTime()||0):pendingSeek; }catch(e){ return; }
+
+    var target=base+(step*direction);
+    if(target<0) target=0;
+    if(total && target>total-2) target=Math.max(0,total-2);
+    pendingSeek=target;
+
+    // Preview only. The ticker leaves these alone while a scrub is pending.
+    el.time.textContent=clockFace(target)+' / '+clockFace(total);
+    el.trackFill.style.width=total?(target/total)*100+'%':'0%';
+    el.nowLabel.textContent=(direction>0?'AHEAD ':'BACK ')+clockFace(step);
+    showChrome();
+
+    if(seekCommit) clearTimeout(seekCommit);
+    seekCommit=setTimeout(commitSeek,450);
+  }
+
+  function commitSeek(){
+    if(pendingSeek===null) return;
+    var target=pendingSeek;
+    pendingSeek=null; seekStreak=-1;
+    try{ player.seekTo(target,true); }catch(e){}
+    el.nowLabel.textContent='ON AIR';
+    saveProgress(true);
+  }
+
+  /* ---------- resume ----------
+     Position is written to the queue every few seconds, and again on the way
+     out, so closing mid-podcast picks up where you left off. */
+  var lastSaved=0;
+  function saveProgress(force){
+    if(!current||!player||!playerReady||!token) return;
+    var at=0;
+    try{ at=player.getCurrentTime()||0; }catch(e){ return; }
+    if(at<5) return;
+    var now=Date.now();
+    if(!force && now-lastSaved<5000) return;
+    lastSaved=now;
+
+    var position=Math.floor(at);
+    current.position=position;
+    try{ localStorage.setItem('rundown.pos.'+current.id,String(position)); }catch(e){}
+
+    var payload=JSON.stringify({id:current.id,position:position});
+    var endpoint='/api/queue?token='+encodeURIComponent(token);
+    if(force && navigator.sendBeacon){
+      try{ navigator.sendBeacon(endpoint,new Blob([payload],{type:'application/json'})); return; }catch(e){}
+    }
+    fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:payload}).catch(function(){});
+  }
+
+  function resumePointFor(item){
+    var saved=item.position||0;
+    try{
+      var local=parseInt(localStorage.getItem('rundown.pos.'+item.id),10);
+      if(local>saved) saved=local;
+    }catch(e){}
+    return saved>10 ? saved : (item.start||0);
+  }
   function togglePlay(){
     if(!player||!playerReady) return;
     try{ var s=player.getPlayerState(); if(s===YT.PlayerState.PLAYING) player.pauseVideo(); else player.playVideo(); }catch(e){}
@@ -667,8 +752,8 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
       showChrome();
       switch(e.key){
         case 'Enter': togglePlay(); break;
-        case 'ArrowLeft': seek(-SEEK_STEP); break;
-        case 'ArrowRight': seek(SEEK_STEP); break;
+        case 'ArrowLeft': scrub(-1); break;
+        case 'ArrowRight': scrub(1); break;
         case 'ArrowUp':
           if(UPDOWN==='volume') nudgeVolume(10); else nudgeSpeed(1);
           break;
@@ -687,7 +772,12 @@ const GLASSES_PAGE = String.raw`<!DOCTYPE html>
   // If focus escapes into the iframe, snatch it straight back.
   window.addEventListener('blur',function(){ setTimeout(holdFocus,50); });
   document.addEventListener('focusout',function(){ setTimeout(holdFocus,50); });
-  document.addEventListener('visibilitychange',function(){ if(!document.hidden) holdFocus(); });
+
+  window.addEventListener('pagehide',function(){ if(view==='player') saveProgress(true); });
+  document.addEventListener('visibilitychange',function(){
+    if(document.hidden){ if(view==='player') saveProgress(true); }
+    else holdFocus();
+  });
 
   window.addEventListener('popstate',function(event){
     var screen=event.state&&event.state.screen;
@@ -792,9 +882,15 @@ const PHONE_PAGE = String.raw`<!DOCTYPE html>
     el.count.textContent=items.length?String(items.length).padStart(2,'0'):'--';
     if(!items.length){ el.items.innerHTML='<div class="empty">Empty. Anything you queue shows up on the glasses within a few seconds.</div>'; return; }
     el.items.innerHTML=items.map(function(item,i){
+      var mark='';
+      if(item.position>10){
+        var s=Math.floor(item.position), m=Math.floor(s/60), r=s%60;
+        var h=Math.floor(m/60);
+        mark=' &middot; resume '+(h>0?h+':'+String(m%60).padStart(2,'0'):String(m))+':'+String(r).padStart(2,'0');
+      }
       return '<div class="item"><span class="item-num mono">'+String(i+1).padStart(2,'0')+
         '</span><div class="item-body"><div class="item-title">'+esc(item.title)+'</div>'+
-        (item.channel?'<div class="item-channel">'+esc(item.channel)+'</div>':'')+
+        ((item.channel||mark)?'<div class="item-channel">'+esc(item.channel)+mark+'</div>':'')+
         '</div><button class="item-drop" data-id="'+item.id+'" aria-label="Remove">&times;</button></div>';
     }).join('');
     Array.prototype.forEach.call(el.items.querySelectorAll('.item-drop'),function(node){
@@ -963,6 +1059,7 @@ async function addToQueue(token, source, rawQuery) {
     start,
     title: meta.title || 'Untitled video',
     channel: meta.channel || '',
+    position: 0,
     addedAt: Date.now(),
   };
   const next = [...items, entry].slice(-MAX_ITEMS);
@@ -1016,6 +1113,20 @@ async function handleQueue(req, res, url) {
 
     if (req.method === 'POST') {
       const body = await readBody(req);
+
+      // A position update, sent while a video plays, rather than a new link.
+      if (body.id && typeof body.position === 'number') {
+        const items = await readQueue(token);
+        let touched = false;
+        const next = items.map((item) => {
+          if (item.id !== body.id) return item;
+          touched = true;
+          return {...item, position: Math.max(0, Math.floor(body.position))};
+        });
+        if (touched) await writeQueue(token, next);
+        return sendJson(res, 200, {ok: touched});
+      }
+
       const result = await addToQueue(token, body.url || body.text || '', url.search);
       return sendJson(res, result.status, result.body);
     }
